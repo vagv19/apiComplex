@@ -1,0 +1,14 @@
+{
+  "title": "Sport Complex La Pasión",
+  "description": "Administra torneos, equipos, jugadores, calendarios y resultados de Sport Complex La Pasión.",
+  "robots": {
+    "index": false
+  },
+  "icons": {
+    "icon": "logo.jpg"
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
