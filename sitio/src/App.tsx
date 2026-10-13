@@ -68,7 +68,6 @@ const navItems = [
   ["Inicio", "top"],
   ["Torneos", "torneos"],
   ["Instalaciones", "instalaciones"],
-  ["Galería", "galeria"],
   ["Ubicación", "ubicacion"],
 ]
 
