@@ -21,7 +21,12 @@ class Request
         $path = $path === '' ? '/' : $path;
 
         $scriptName = $_SERVER['SCRIPT_NAME'] ?? '/index.php';
-        $scriptDir = rtrim(str_replace('\\', '/', dirname($scriptName)), '/');
+        $normalizedScriptName = str_replace('\\', '/', $scriptName);
+        if (basename($normalizedScriptName) !== 'index.php') {
+            return $path;
+        }
+
+        $scriptDir = rtrim(str_replace('\\', '/', dirname($normalizedScriptName)), '/');
         if ($scriptDir !== '' && $scriptDir !== '.' && $scriptDir !== '/') {
             if ($path === $scriptDir) {
                 return '/';

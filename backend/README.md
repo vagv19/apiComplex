@@ -50,6 +50,8 @@ php -S 127.0.0.1:8000 public/index.php
 - `POST /api/v1/tournaments/{id}/player-registration`
 - `POST /api/v1/expulsion-reasons/{id}`
 - `GET /api/v1/public/tournaments`
+- `GET /api/v1/public/facilities/images`
+- `GET /api/v1/public/facilities/images/{filename}`
 - `GET /api/v1/public/tournaments/{id}/top-scorers`
 - `GET /api/v1/public/tournaments/{id}/images`
 - `GET /api/v1/public/tournaments/{id}/images/{filename}`
@@ -188,6 +190,37 @@ físicas ni nombres de archivo con separadores. Los fallos de lectura responden
 Además de los archivos ubicados en `backend/img/tournament/{id}/`, acepta
 `backend/img/tournament/{id}.jpg` cuando el nombre del archivo coincide
 exactamente con el identificador del torneo.
+
+### Galería pública de instalaciones
+
+Ambas rutas son públicas, no requieren token y no reciben cuerpo JSON.
+
+`GET /api/v1/public/facilities/images` no requiere parámetros. Devuelve las
+imágenes permitidas de `backend/img/facilities/`, ordenadas por nombre.
+Acepta JPG, JPEG, PNG, WEBP y GIF; excluye archivos ocultos, enlaces
+simbólicos y archivos con otras extensiones.
+
+```json
+{
+  "success": true,
+  "message": "Galería de instalaciones consultada.",
+  "data": [
+    {
+      "filename": "cancha.jpg",
+      "url": "/backend/public/api/v1/public/facilities/images/cancha.jpg"
+    }
+  ]
+}
+```
+
+Un directorio legible pero vacío devuelve `200` con `"data": []`. Un fallo al
+enumerar la carpeta devuelve `500` con la forma estándar de error JSON.
+
+`GET /api/v1/public/facilities/images/{filename}` recibe el nombre de archivo
+en la ruta y devuelve sus bytes con el tipo MIME correspondiente. No acepta
+rutas físicas, separadores de directorio ni extensiones no permitidas; esos
+casos y los archivos inexistentes responden `404`. Los fallos de lectura
+responden `500` sin exponer detalles internos.
 
 ### Match scheduling and matches by day
 

@@ -14,6 +14,7 @@ require_once __DIR__ . '/../src/Services/ScheduleAlgorithms.php';
 require_once __DIR__ . '/../src/Services/TournamentFormatService.php';
 require_once __DIR__ . '/../src/Services/StandingsService.php';
 require_once __DIR__ . '/../src/Services/PublicTournamentService.php';
+require_once __DIR__ . '/../src/Services/FacilityService.php';
 require_once __DIR__ . '/../src/Services/MatchResultService.php';
 require_once __DIR__ . '/../src/Services/MatchReportService.php';
 require_once __DIR__ . '/../vendor/dompdf/autoload.inc.php';
@@ -24,6 +25,7 @@ require_once __DIR__ . '/../src/Controllers/MatchController.php';
 require_once __DIR__ . '/../src/Middleware/AuthMiddleware.php';
 require_once __DIR__ . '/../src/Controllers/MatchReportController.php';
 require_once __DIR__ . '/../src/Controllers/PublicTournamentController.php';
+require_once __DIR__ . '/../src/Controllers/FacilityController.php';
 
 putenv('DB_DRIVER=sqlite');
 $testDatabasePath = __DIR__ . '/test.sqlite';

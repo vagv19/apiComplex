@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react"
 
-type Page = "home" | "league" | "flash" | "cup"
+type Page = "home" | "facilities" | "league" | "flash" | "cup"
 type Theme = "red" | "gray" | "black" | "white"
 
 import { siteAssets } from "./config/site-assets"
+
+type FacilityImage = {
+  filename: string
+  url: string
+}
 
 type TournamentSummary = {
   id: number
@@ -44,10 +49,10 @@ type TournamentStandingRow = {
   points: number
 }
 
-const API_BASE = "/backend-api"
+const API_BASE = import.meta.env.DEV ? "/backend-api" : "/backend/public"
 const SITE_NAME = "Sport Complex La Pasion Cancha Fut7"
 const photos = {
-  hero: "https://images.unsplash.com/photo-1741862470968-ccceece09f10?auto=format&fit=crop&w=1800&q=88",
+  hero: siteAssets.facilities.cancha,
   aerial:
     "https://images.unsplash.com/photo-1729843352938-0e10fbf96585?auto=format&fit=crop&w=1400&q=85",
   game: "https://images.unsplash.com/flagged/photo-1550413231-202a9d53a331?auto=format&fit=crop&w=1400&q=85",
@@ -120,6 +125,15 @@ function normalizePublicImageUrl(url: string): string {
   const apiPath = "/api/v1/public/tournaments/"
   const apiPathIndex = url.indexOf(apiPath)
   return apiPathIndex === -1 ? url : `${API_BASE}${url.slice(apiPathIndex)}`
+}
+
+function normalizePublicApiUrl(url: string): string {
+  const apiPath = "/api/v1/"
+  const apiPathIndex = url.indexOf(apiPath)
+  if (apiPathIndex === -1) {
+    throw new Error("La API devolvió una URL de imagen inválida.")
+  }
+  return `${API_BASE}${url.slice(apiPathIndex)}`
 }
 
 function getMonclovaDate(): string {
@@ -225,6 +239,10 @@ function Header({
   const [open, setOpen] = useState(false)
   const go = (id: string) => {
     setOpen(false)
+    if (id === "instalaciones") {
+      onPage("facilities")
+      return
+    }
     if (id === "top") onPage("home")
     else {
       if (page !== "home") onPage("home")
@@ -253,7 +271,12 @@ function Header({
             <button
               key={id}
               onClick={() => go(id)}
-              className={page === "home" && id === "top" ? "active" : ""}
+              className={
+                (page === "home" && id === "top") ||
+                (page === "facilities" && id === "instalaciones")
+                  ? "active"
+                  : ""
+              }
             >
               {label}
             </button>
@@ -504,6 +527,137 @@ function Gallery({
   )
 }
 
+function FacilitiesGallery() {
+  const [images, setImages] = useState<FacilityImage[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const [selected, setSelected] = useState<number | null>(null)
+
+  useEffect(() => {
+    let isCurrent = true
+
+    void (async () => {
+      try {
+        const data = await fetchJson<FacilityImage[]>("/public/facilities/images")
+        const resolvedImages = data.map((image) => ({
+          ...image,
+          url: normalizePublicApiUrl(image.url),
+        }))
+        if (isCurrent) {
+          setImages(resolvedImages)
+        }
+      } catch (loadError) {
+        console.error(loadError)
+        if (isCurrent) {
+          setError(true)
+        }
+      } finally {
+        if (isCurrent) {
+          setLoading(false)
+        }
+      }
+    })()
+
+    return () => {
+      isCurrent = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (selected === null) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelected(null)
+      } else if (event.key === "ArrowLeft") {
+        setSelected((index) => index === null ? null : (index + images.length - 1) % images.length)
+      } else if (event.key === "ArrowRight") {
+        setSelected((index) => index === null ? null : (index + 1) % images.length)
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [images.length, selected])
+
+  const move = (direction: number) => {
+    setSelected((index) =>
+      index === null ? null : (index + direction + images.length) % images.length,
+    )
+  }
+
+  return (
+    <main className="facilities-page container">
+      <SectionTitle kicker="GALERÍA" title="Nuestras instalaciones" />
+      {loading ? (
+        <p className="gallery-empty">Cargando fotografías...</p>
+      ) : error ? (
+        <p className="gallery-empty" role="alert">
+          No fue posible cargar las fotografías de las instalaciones.
+        </p>
+      ) : images.length === 0 ? (
+        <p className="gallery-empty">No hay fotografías disponibles.</p>
+      ) : (
+        <div className="facility-grid">
+          {images.map((image, index) => (
+            <button
+              className="facility-thumb"
+              key={image.filename}
+              onClick={() => setSelected(index)}
+              aria-label={`Ampliar fotografía ${index + 1}`}
+            >
+              <img src={image.url} alt={`Instalaciones ${index + 1}`} loading="lazy" />
+            </button>
+          ))}
+        </div>
+      )}
+      {selected !== null && (
+        <div
+          className="lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Galería de instalaciones"
+          onClick={() => setSelected(null)}
+        >
+          <button
+            className="lightbox-close"
+            onClick={() => setSelected(null)}
+            aria-label="Cerrar galería"
+          >
+            <Icon name="close" />
+          </button>
+          <button
+            className="lightbox-prev"
+            onClick={(event) => {
+              event.stopPropagation()
+              move(-1)
+            }}
+            aria-label="Fotografía anterior"
+          >
+            ‹
+          </button>
+          <img
+            src={images[selected].url}
+            alt={images[selected].filename}
+            onClick={(event) => event.stopPropagation()}
+          />
+          <button
+            className="lightbox-next"
+            onClick={(event) => {
+              event.stopPropagation()
+              move(1)
+            }}
+            aria-label="Fotografía siguiente"
+          >
+            ›
+          </button>
+          <span>{selected + 1} / {images.length}</span>
+        </div>
+      )}
+    </main>
+  )
+}
+
 function Home({
   onPage,
   tournaments,
@@ -615,7 +769,7 @@ function Home({
             title="Un espacio para jugar, competir y convivir."
             text="Somos un punto de encuentro para futbolistas, familias y aficionados. Organizamos competencias amateur en instalaciones pensadas para disfrutar cada jornada."
           />
-          <button className="text-link">
+          <button className="text-link" onClick={() => onPage("facilities")}>
             Conocer las instalaciones <Icon name="arrow" />
           </button>
         </div>
@@ -796,7 +950,6 @@ function Standings({
         <span>
           <i /> Zona de clasificación
         </span>
-        <small>Datos ficticios para demostración</small>
       </div>
     </div>
   )
@@ -1172,7 +1325,7 @@ function Footer({ onPage }: { onPage: (p: Page) => void }) {
           <b>NAVEGACIÓN</b>
           <button onClick={() => onPage("home")}>Inicio</button>
           <button onClick={() => onPage("league")}>Torneos</button>
-          <button onClick={() => onPage("home")}>Instalaciones</button>
+          <button onClick={() => onPage("facilities")}>Instalaciones</button>
         </div>
         <div>
           <b>CONTACTO</b>
@@ -1262,7 +1415,7 @@ export default function App() {
   }, [theme])
 
   const detailTournament =
-    page === "home"
+    page === "home" || page === "facilities"
       ? null
       : selectedTournament ??
         tournaments.find((item) =>
@@ -1289,6 +1442,8 @@ export default function App() {
           matchOfDayLoading={matchOfDayLoading}
           matchOfDayError={matchOfDayError}
         />
+      ) : page === "facilities" ? (
+        <FacilitiesGallery />
       ) : detailTournament ? (
         <TournamentDetail tournament={detailTournament} onPage={changePage} />
       ) : (

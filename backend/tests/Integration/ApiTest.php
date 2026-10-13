@@ -8,6 +8,7 @@ use App\Config\Database;
 use App\Core\HttpException;
 use App\Controllers\MatchController;
 use App\Controllers\MatchReportController;
+use App\Controllers\FacilityController;
 use App\Controllers\PublicTournamentController;
 use App\Controllers\TournamentController;
 use App\Core\Request;
@@ -21,6 +22,7 @@ use App\Services\MatchResultService;
 use App\Services\MatchSheetPdfService;
 use App\Services\MatchSheetService;
 use App\Services\PublicTournamentService;
+use App\Services\FacilityService;
 use App\Services\TournamentFormatService;
 use PHPUnit\Framework\TestCase;
 use PDO;
@@ -1617,6 +1619,7 @@ class ApiTest extends TestCase
             } else {
                 $_SERVER['REQUEST_URI'] = $previousRequestUri;
             }
+
             $images = $galleryResponse['body']['data'];
 
             $this->assertSame(200, $galleryResponse['status']);
@@ -1661,6 +1664,97 @@ class ApiTest extends TestCase
             }
             if (is_dir($root)) {
                 rmdir($root);
+            }
+        }
+    }
+
+    public function testPublicFacilityGalleryListsAndServesOnlyAllowedImages(): void
+    {
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'football-facilities-' . bin2hex(random_bytes(8));
+        mkdir($root);
+
+        $files = [
+            '10.JPG' => 'ten',
+            '2.jpg' => 'two',
+            'WhatsApp Image.jpeg' => 'space',
+            '.hidden.png' => 'hidden',
+            'notes.txt' => 'not an image',
+            'temporary.jpg.tmp' => 'temporary',
+        ];
+        foreach ($files as $filename => $contents) {
+            file_put_contents($root . DIRECTORY_SEPARATOR . $filename, $contents);
+        }
+
+        $previousRequestUri = $_SERVER['REQUEST_URI'] ?? null;
+        try {
+            $service = new FacilityService($root);
+            $prefix = '/v2/backend/public/api/v1/public/facilities/images';
+            $images = $service->getImages($prefix);
+
+            $this->assertSame(['2.jpg', '10.JPG', 'WhatsApp Image.jpeg'], array_column($images, 'filename'));
+            $this->assertSame($prefix . '/WhatsApp%20Image.jpeg', $images[2]['url']);
+            $this->assertSame('image/jpeg', $service->getImage('10.JPG')['mime_type']);
+            $this->assertNull($service->getImage('../10.JPG'));
+            $this->assertNull($service->getImage('notes.txt'));
+
+            $controller = new FacilityController($service);
+            $_SERVER['REQUEST_URI'] = $prefix;
+            $listResponse = $this->captureJsonResponse(
+                fn () => $controller->images(
+                    new Request('GET', '/api/v1/public/facilities/images', [], [], []),
+                    []
+                )
+            );
+            $this->assertSame(200, $listResponse['status']);
+            $this->assertTrue($listResponse['body']['success']);
+            $this->assertSame($images, $listResponse['body']['data']);
+
+            ob_start();
+            $controller->image(
+                new Request('GET', '/api/v1/public/facilities/images/WhatsApp%20Image.jpeg', [], [], []),
+                ['filename' => 'WhatsApp%20Image.jpeg']
+            );
+            $this->assertSame('space', ob_get_clean());
+
+            $notFoundResponse = $this->captureJsonResponse(
+                fn () => $controller->image(
+                    new Request('GET', '/api/v1/public/facilities/images/notes.txt', [], [], []),
+                    ['filename' => 'notes.txt']
+                )
+            );
+            $this->assertSame(404, $notFoundResponse['status']);
+            $this->assertFalse($notFoundResponse['body']['success']);
+        } finally {
+            if ($previousRequestUri === null) {
+                unset($_SERVER['REQUEST_URI']);
+            } else {
+                $_SERVER['REQUEST_URI'] = $previousRequestUri;
+            }
+            foreach (array_keys($files) as $filename) {
+                $path = $root . DIRECTORY_SEPARATOR . $filename;
+                if (is_file($path)) {
+                    unlink($path);
+                }
+            }
+            rmdir($root);
+        }
+    }
+
+    public function testRequestPathNormalizationDoesNotTrimARequestedFilePath(): void
+    {
+        $previousScriptName = $_SERVER['SCRIPT_NAME'] ?? null;
+        try {
+            $_SERVER['SCRIPT_NAME'] = '/api/v1/public/facilities/images/2.jpeg';
+
+            $this->assertSame(
+                '/api/v1/public/facilities/images/2.jpeg',
+                Request::normalizePath('/api/v1/public/facilities/images/2.jpeg')
+            );
+        } finally {
+            if ($previousScriptName === null) {
+                unset($_SERVER['SCRIPT_NAME']);
+            } else {
+                $_SERVER['SCRIPT_NAME'] = $previousScriptName;
             }
         }
     }

@@ -7,12 +7,15 @@ import siteConfiguration from './.figma/make/site.json'
 
 
 // Vite config — https://vitejs.dev/config/
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
   // .figma/make/deploy-preview passes `--mode development` for cached-preview builds.
   const emitSourcemaps = mode === 'development'
+  const base = process.env.FIGMA_PUBLIC_URL
+    ? `${process.env.FIGMA_PUBLIC_URL.replace(/\/+$/, '')}/`
+    : '/sitio/'
 
   return {
-    base: process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : '/',
+    base,
     build: {
       sourcemap: emitSourcemaps ? 'inline' : false,
       minify: !emitSourcemaps,
@@ -20,7 +23,7 @@ export default defineConfig(({ mode }) => {
     plugins: [
 react(),
       tailwindcss(),
-      figmaSiteConfiguration(siteConfiguration),
+      figmaSiteConfiguration(siteConfiguration, base, command),
       figmaErrorOverlayReplay(),
       figmaReactRefreshBoundaryFallback(),
       figmaMakeKitPlugin({ storiesGlob: '/src/**/*.stories.{ts,tsx,js,jsx}' }),
@@ -36,9 +39,9 @@ react(),
       strictPort: true,
       proxy: {
         '/backend-api': {
-          target: 'http://127.0.0.1',
+          target: 'http://192.168.25.1/apiComplex',
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/backend-api/, '/apiComplex/backend/public'),
+          rewrite: (path) => path.replace(/^\/backend-api/, '/backend/public'),
         },
       },
       watch: {
@@ -52,9 +55,9 @@ react(),
       port: parseInt(process.env.PORT || '8444'),
       proxy: {
         '/backend-api': {
-          target: 'http://127.0.0.1',
+          target: 'http://192.168.25.1/apiComplex',
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/backend-api/, '/apiComplex/backend/public'),
+          rewrite: (path) => path.replace(/^\/backend-api/, '/backend/public'),
         },
       },
     },
@@ -89,7 +92,11 @@ type FigmaSiteConfiguration = {
 }
 
 /** Applies /.figma/make/site.json to the generated document shell. */
-function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
+function figmaSiteConfiguration(
+  config: FigmaSiteConfiguration,
+  base: string,
+  command: 'build' | 'serve',
+): Plugin {
   function sanitizeHtmlValue(value: string | undefined): string {
     return value?.replace(/[^a-zA-Z0-9_-]/g, '') || ''
   }
@@ -99,11 +106,20 @@ function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
   function replaceHtmlCommentSlot(html: string, slotName: string, content: string): string {
     return html.replace(`<!-- ${slotName} -->`, content)
   }
+  function resolvePublicAsset(path: string): string {
+    if (/^(?:[a-z]+:)?\/\//i.test(path)) {
+      return path
+    }
+    if (command === 'serve') {
+      return `/${path.replace(/^\/+/, '')}`
+    }
+    return `${base}${path.replace(/^\/+/, '')}`
+  }
 
-  const title = config.title ?? "Figma Make App"
+  const title = config.title ?? "Sport Complex La Pasion"
   const description = config.description ?? ''
   // Imported HTML keeps its own favicon; new Makes default to the Make product icon.
-  const favicon = config.icons?.icon ?? '/favicon.svg'
+  const favicon = resolvePublicAsset(config.icons?.icon ?? '/favicon.svg')
   const socialImage = config.openGraph?.image ?? ''
   const language = sanitizeHtmlValue(config.language) || 'en'
   const googleAnalyticsId = sanitizeHtmlValue(config.analytics?.googleAnalyticsId)

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Controllers\AuthController;
 use App\Controllers\CategoryController;
+use App\Controllers\FacilityController;
 use App\Controllers\MatchController;
 use App\Controllers\MatchReportController;
 use App\Controllers\PlayerController;
@@ -85,6 +86,8 @@ return function (): Router {
 
     $router->get('/api/v1/public/tournaments', [PublicTournamentController::class, 'list']);
     $router->get('/api/v1/public/matches/first', [PublicTournamentController::class, 'firstMatchOfDay']);
+    $router->get('/api/v1/public/facilities/images', [FacilityController::class, 'images']);
+    $router->get('/api/v1/public/facilities/images/{filename}', [FacilityController::class, 'image']);
     $router->get('/api/v1/public/tournaments/{id}/top-scorers', [PublicTournamentController::class, 'topScorers']);
     $router->get('/api/v1/public/tournaments/{id}/images', [PublicTournamentController::class, 'images']);
     $router->get('/api/v1/public/tournaments/{id}/images/{filename}', [PublicTournamentController::class, 'image']);
