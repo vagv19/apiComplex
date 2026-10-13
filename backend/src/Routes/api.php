@@ -7,6 +7,7 @@ use App\Controllers\CategoryController;
 use App\Controllers\MatchController;
 use App\Controllers\MatchReportController;
 use App\Controllers\PlayerController;
+use App\Controllers\PublicTournamentController;
 use App\Controllers\ScheduleController;
 use App\Controllers\StandingsController;
 use App\Controllers\TeamController;
@@ -81,6 +82,12 @@ return function (): Router {
 
     $router->get('/api/v1/tournaments/{id}/standings', [StandingsController::class, 'tournament']);
     $router->get('/api/v1/groups/{id}/standings', [StandingsController::class, 'group']);
+
+    $router->get('/api/v1/public/tournaments', [PublicTournamentController::class, 'list']);
+    $router->get('/api/v1/public/matches/first', [PublicTournamentController::class, 'firstMatchOfDay']);
+    $router->get('/api/v1/public/tournaments/{id}/top-scorers', [PublicTournamentController::class, 'topScorers']);
+    $router->get('/api/v1/public/tournaments/{id}/images', [PublicTournamentController::class, 'images']);
+    $router->get('/api/v1/public/tournaments/{id}/images/{filename}', [PublicTournamentController::class, 'image']);
 
     return $router;
 };

@@ -26,8 +26,8 @@ host, define `VITE_API_BASE_URL` in a local Vite environment file, for example:
 VITE_API_BASE_URL=http://127.0.0.1/apiComplex/backend/public/api/v1
 ```
 
-For a production build hosted by XAMPP, the frontend assets are built with base
-path `/apiComplex/frontend/dist/` and the API uses the same-origin XAMPP URL.
+For a production build, the frontend assets are built with base path `/v2/`
+and the API uses the same-origin URL `/v2/backend/public/api/v1`.
 
 ## Run and build
 

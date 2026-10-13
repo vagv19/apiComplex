@@ -8,18 +8,22 @@ use App\Config\Database;
 use App\Core\HttpException;
 use App\Controllers\MatchController;
 use App\Controllers\MatchReportController;
+use App\Controllers\PublicTournamentController;
 use App\Controllers\TournamentController;
 use App\Core\Request;
 use App\Repositories\CategoryRepository;
 use App\Repositories\PlayerRepository;
+use App\Repositories\PublicTournamentRepository;
 use App\Repositories\TeamRepository;
 use App\Repositories\TournamentRepository;
 use App\Services\ScheduleGeneratorService;
 use App\Services\MatchResultService;
 use App\Services\MatchSheetPdfService;
 use App\Services\MatchSheetService;
+use App\Services\PublicTournamentService;
 use App\Services\TournamentFormatService;
 use PHPUnit\Framework\TestCase;
+use PDO;
 
 class ApiTest extends TestCase
 {
@@ -1351,6 +1355,345 @@ class ApiTest extends TestCase
         )->fetchColumn());
     }
 
+    public function testPublicTopScorersCountOnlyCompletedIndividualGoalsAndShareTiedPositions(): void
+    {
+        [$tournament, $matchId, $homePlayerRegistrationId, $awayPlayerRegistrationId] = $this->createMatchReportFixture('Public scorers');
+        $pdo = Database::getConnection();
+        $this->insertPublicGoal($pdo, $matchId, $homePlayerRegistrationId, (int) $tournament['home_tournament_team_id'], 'REGULAR');
+        $this->insertPublicGoal($pdo, $matchId, $homePlayerRegistrationId, (int) $tournament['home_tournament_team_id'], 'PENALTY');
+        $this->insertPublicGoal($pdo, $matchId, $homePlayerRegistrationId, (int) $tournament['home_tournament_team_id'], 'REGULAR');
+        $this->insertPublicGoal($pdo, $matchId, $awayPlayerRegistrationId, (int) $tournament['away_tournament_team_id'], 'REGULAR');
+        $this->insertPublicGoal($pdo, $matchId, $awayPlayerRegistrationId, (int) $tournament['away_tournament_team_id'], 'PENALTY');
+        $this->insertPublicGoal($pdo, $matchId, $awayPlayerRegistrationId, (int) $tournament['away_tournament_team_id'], 'REGULAR');
+        $this->insertPublicGoal($pdo, $matchId, $awayPlayerRegistrationId, (int) $tournament['home_tournament_team_id'], 'OWN_GOAL');
+
+        $matchQuery = $pdo->prepare('SELECT round_id FROM matches WHERE id = :id');
+        $matchQuery->execute([':id' => $matchId]);
+        $roundId = (int) $matchQuery->fetchColumn();
+        $pendingMatch = $pdo->prepare(
+            'INSERT INTO matches (round_id, home_tournament_team_id, away_tournament_team_id, status, is_bye)
+             VALUES (:round_id, :home_team_id, :away_team_id, :status, 0)'
+        );
+        $pendingMatch->execute([
+            ':round_id' => $roundId,
+            ':home_team_id' => $tournament['home_tournament_team_id'],
+            ':away_team_id' => $tournament['away_tournament_team_id'],
+            ':status' => 'SCHEDULED',
+        ]);
+        $this->insertPublicGoal($pdo, (int) $pdo->lastInsertId(), $homePlayerRegistrationId, (int) $tournament['home_tournament_team_id'], 'REGULAR');
+
+        $pdo->prepare('UPDATE matches SET status = :status WHERE id = :id')->execute([':status' => 'COMPLETED', ':id' => $matchId]);
+        $playerIdQuery = $pdo->prepare('SELECT player_id FROM tournament_players WHERE id = :id');
+        $playerIdQuery->execute([':id' => $homePlayerRegistrationId]);
+        $homePlayerId = (int) $playerIdQuery->fetchColumn();
+        $playerIdQuery->execute([':id' => $awayPlayerRegistrationId]);
+        $awayPlayerId = (int) $playerIdQuery->fetchColumn();
+
+        $routerFactory = require dirname(__DIR__, 2) . '/src/Routes/api.php';
+        $router = $routerFactory();
+        $response = $this->captureJsonResponse(
+            fn () => $router->dispatch(
+                new Request('GET', '/api/v1/public/tournaments/' . $tournament['id'] . '/top-scorers', ['limit' => '10'], [], [])
+            )
+        );
+        $this->assertSame(200, $response['status']);
+        $this->assertTrue($response['body']['success']);
+        $this->assertSame([
+            ['position' => 1, 'player_id' => $awayPlayerId, 'player_name' => 'Away Player', 'tournament_team_id' => (int) $tournament['away_tournament_team_id'], 'team_name' => 'Public scorers away', 'total_goals' => 3],
+            ['position' => 1, 'player_id' => $homePlayerId, 'player_name' => 'Home Player', 'tournament_team_id' => (int) $tournament['home_tournament_team_id'], 'team_name' => 'Public scorers home', 'total_goals' => 3],
+        ], $response['body']['data']);
+    }
+
+    public function testPublicTopScorersReturnEmptyForTournamentWithoutGoalsAndValidateLimitAndTournament(): void
+    {
+        $tournament = (new TournamentRepository())->create([
+            'name' => 'No public goals',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $controller = new PublicTournamentController();
+
+        $empty = $this->captureJsonResponse(
+            fn () => $controller->topScorers(
+                new Request('GET', '/api/v1/public/tournaments/' . $tournament['id'] . '/top-scorers', [], [], []),
+                ['id' => (string) $tournament['id']]
+            )
+        );
+        $this->assertSame(200, $empty['status']);
+        $this->assertSame([], $empty['body']['data']);
+
+        $badLimit = $this->captureJsonResponse(
+            fn () => $controller->topScorers(
+                new Request('GET', '/api/v1/public/tournaments/' . $tournament['id'] . '/top-scorers', ['limit' => '101'], [], []),
+                ['id' => (string) $tournament['id']]
+            )
+        );
+        $this->assertSame(422, $badLimit['status']);
+
+        $invalidTournamentId = $this->captureJsonResponse(
+            fn () => $controller->topScorers(
+                new Request('GET', '/api/v1/public/tournaments/invalid/top-scorers', [], [], []),
+                ['id' => 'invalid']
+            )
+        );
+        $this->assertSame(422, $invalidTournamentId['status']);
+
+        $missingTournament = $this->captureJsonResponse(
+            fn () => $controller->topScorers(
+                new Request('GET', '/api/v1/public/tournaments/99999/top-scorers', [], [], []),
+                ['id' => '99999']
+            )
+        );
+        $this->assertSame(404, $missingTournament['status']);
+    }
+
+    public function testPublicTournamentListReturnsOnlyActiveTournaments(): void
+    {
+        $repository = new TournamentRepository();
+        $draft = $repository->create([
+            'name' => 'Draft tournament',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'DRAFT',
+        ]);
+        $registration = $repository->create([
+            'name' => 'Registration tournament',
+            'category_id' => 1,
+            'format' => 'FLASH',
+            'status' => 'REGISTRATION',
+        ]);
+        $inProgress = $repository->create([
+            'name' => 'In progress tournament',
+            'category_id' => 1,
+            'format' => 'CUP',
+            'status' => 'IN_PROGRESS',
+        ]);
+        $completed = $repository->create([
+            'name' => 'Completed tournament',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'COMPLETED',
+        ]);
+        $cancelled = $repository->create([
+            'name' => 'Cancelled tournament',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'CANCELLED',
+        ]);
+
+        $controller = new PublicTournamentController();
+        $response = $this->captureJsonResponse(
+            fn () => $controller->list(
+                new Request('GET', '/api/v1/public/tournaments', ['page' => '1', 'limit' => '10'], [], []),
+                []
+            )
+        );
+
+        $this->assertSame(200, $response['status']);
+        $this->assertTrue($response['body']['success']);
+        $ids = array_map(static fn (array $tournament): int => (int) $tournament['id'], $response['body']['data']['items']);
+        $this->assertContains((int) $registration['id'], $ids);
+        $this->assertContains((int) $inProgress['id'], $ids);
+        $this->assertNotContains((int) $draft['id'], $ids);
+        $this->assertNotContains((int) $completed['id'], $ids);
+        $this->assertNotContains((int) $cancelled['id'], $ids);
+    }
+
+    public function testPublicFirstMatchOfDayReturnsEarliestMatchInActiveTournaments(): void
+    {
+        [, $lateMatchId] = $this->createMatchReportFixture('Later match');
+        [, $firstMatchId] = $this->createMatchReportFixture('First match');
+        [, $cancelledMatchId] = $this->createMatchReportFixture('Cancelled match');
+
+        $pdo = Database::getConnection();
+        $updateMatch = $pdo->prepare(
+            'UPDATE matches
+             SET match_date = :match_date, kickoff_time = :kickoff_time,
+                 status = :status, home_score = :home_score, away_score = :away_score
+             WHERE id = :id'
+        );
+        $updateMatch->execute([
+            ':match_date' => '2026-10-13',
+            ':kickoff_time' => '18:00:00',
+            ':status' => 'SCHEDULED',
+            ':home_score' => null,
+            ':away_score' => null,
+            ':id' => $lateMatchId,
+        ]);
+        $updateMatch->execute([
+            ':match_date' => '2026-10-13',
+            ':kickoff_time' => '15:30:00',
+            ':status' => 'COMPLETED',
+            ':home_score' => 2,
+            ':away_score' => 1,
+            ':id' => $firstMatchId,
+        ]);
+        $updateMatch->execute([
+            ':match_date' => '2026-10-13',
+            ':kickoff_time' => '09:00:00',
+            ':status' => 'CANCELLED',
+            ':home_score' => null,
+            ':away_score' => null,
+            ':id' => $cancelledMatchId,
+        ]);
+
+        $response = $this->captureJsonResponse(
+            fn () => (new PublicTournamentController())->firstMatchOfDay(
+                new Request('GET', '/api/v1/public/matches/first', ['date' => '2026-10-13'], [], []),
+                []
+            )
+        );
+
+        $this->assertSame(200, $response['status']);
+        $this->assertTrue($response['body']['success']);
+        $this->assertSame($firstMatchId, (int) $response['body']['data']['id']);
+        $this->assertSame('15:30:00', $response['body']['data']['kickoff_time']);
+        $this->assertSame('COMPLETED', $response['body']['data']['status']);
+    }
+
+    public function testPublicFirstMatchOfDayReturnsNullAndValidatesDate(): void
+    {
+        $controller = new PublicTournamentController();
+        $noMatchResponse = $this->captureJsonResponse(
+            fn () => $controller->firstMatchOfDay(
+                new Request('GET', '/api/v1/public/matches/first', ['date' => '2026-10-13'], [], []),
+                []
+            )
+        );
+        $this->assertSame(200, $noMatchResponse['status']);
+        $this->assertNull($noMatchResponse['body']['data']);
+
+        $invalidDateResponse = $this->captureJsonResponse(
+            fn () => $controller->firstMatchOfDay(
+                new Request('GET', '/api/v1/public/matches/first', ['date' => '2026-02-30'], [], []),
+                []
+            )
+        );
+        $this->assertSame(422, $invalidDateResponse['status']);
+        $this->assertFalse($invalidDateResponse['body']['success']);
+        $this->assertArrayHasKey('date', $invalidDateResponse['body']['errors']);
+    }
+
+    public function testPublicTournamentGalleryListsOnlyAllowedImagesAndRejectsTraversal(): void
+    {
+        $tournament = (new TournamentRepository())->create([
+            'name' => 'Public image gallery',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'football-gallery-' . bin2hex(random_bytes(8));
+        $directory = $root . DIRECTORY_SEPARATOR . $tournament['id'];
+        $missingRootService = new PublicTournamentService(
+            new PublicTournamentRepository(Database::getConnection()),
+            $root . '-missing'
+        );
+        $this->assertSame([], $missingRootService->getImages((int) $tournament['id'], '/public/images'));
+        mkdir($directory, 0777, true);
+
+        try {
+            file_put_contents($directory . DIRECTORY_SEPARATOR . 'b.PNG', 'png');
+            file_put_contents($directory . DIRECTORY_SEPARATOR . 'a.jpg', 'jpg');
+            file_put_contents($directory . DIRECTORY_SEPARATOR . '.hidden.jpg', 'hidden');
+            file_put_contents($directory . DIRECTORY_SEPARATOR . 'notes.txt', 'not an image');
+            file_put_contents($directory . DIRECTORY_SEPARATOR . 'pending.jpg.tmp', 'temporary');
+
+            $service = new PublicTournamentService(
+                new PublicTournamentRepository(Database::getConnection()),
+                $root
+            );
+            $controller = new PublicTournamentController($service);
+            $previousRequestUri = $_SERVER['REQUEST_URI'] ?? null;
+            $_SERVER['REQUEST_URI'] = '/v2/backend/public/api/v1/public/tournaments/' . $tournament['id'] . '/images';
+            $galleryResponse = $this->captureJsonResponse(
+                fn () => $controller->images(
+                    new Request('GET', '/api/v1/public/tournaments/' . $tournament['id'] . '/images', [], [], []),
+                    ['id' => (string) $tournament['id']]
+                )
+            );
+            if ($previousRequestUri === null) {
+                unset($_SERVER['REQUEST_URI']);
+            } else {
+                $_SERVER['REQUEST_URI'] = $previousRequestUri;
+            }
+            $images = $galleryResponse['body']['data'];
+
+            $this->assertSame(200, $galleryResponse['status']);
+            $this->assertSame(['a.jpg', 'b.PNG'], array_column($images, 'filename'));
+            $this->assertSame(
+                '/v2/backend/public/api/v1/public/tournaments/' . $tournament['id'] . '/images/b.PNG',
+                $images[1]['url']
+            );
+            $this->assertSame('image/png', $service->getImage((int) $tournament['id'], 'b.PNG')['mime_type']);
+            ob_start();
+            $controller->image(
+                new Request('GET', '/api/v1/public/tournaments/' . $tournament['id'] . '/images/b.PNG', [], [], []),
+                ['id' => (string) $tournament['id'], 'filename' => 'b.PNG']
+            );
+            $this->assertSame('png', ob_get_clean());
+            $this->assertNull($service->getImage((int) $tournament['id'], '../b.PNG'));
+            $this->assertNull($service->getImage((int) $tournament['id'], 'notes.txt'));
+            try {
+                $service->getImages(99999, '/public/images');
+                $this->fail('An unknown tournament must not expose a gallery.');
+            } catch (\DomainException) {
+                $this->assertTrue(true);
+            }
+            unlink($directory . DIRECTORY_SEPARATOR . 'a.jpg');
+            unlink($directory . DIRECTORY_SEPARATOR . 'b.PNG');
+            unlink($directory . DIRECTORY_SEPARATOR . '.hidden.jpg');
+            unlink($directory . DIRECTORY_SEPARATOR . 'notes.txt');
+            unlink($directory . DIRECTORY_SEPARATOR . 'pending.jpg.tmp');
+            rmdir($directory);
+            $this->assertSame([], $service->getImages((int) $tournament['id'], '/public/images'));
+            mkdir($directory);
+            $this->assertSame([], $service->getImages((int) $tournament['id'], '/public/images'));
+        } finally {
+            foreach (['a.jpg', 'b.PNG', '.hidden.jpg', 'notes.txt', 'pending.jpg.tmp'] as $filename) {
+                $file = $directory . DIRECTORY_SEPARATOR . $filename;
+                if (is_file($file)) {
+                    unlink($file);
+                }
+            }
+            if (is_dir($directory)) {
+                rmdir($directory);
+            }
+            if (is_dir($root)) {
+                rmdir($root);
+            }
+        }
+    }
+
+    public function testPublicTournamentImageSupportsFlatIdJpgFile(): void
+    {
+        $tournament = (new TournamentRepository())->create([
+            'name' => 'Public flat image',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'football-flat-gallery-' . bin2hex(random_bytes(8));
+        mkdir($root, 0777, true);
+        $filename = $tournament['id'] . '.jpg';
+        file_put_contents($root . DIRECTORY_SEPARATOR . $filename, 'jpg-data');
+
+        try {
+            $service = new PublicTournamentService(
+                new PublicTournamentRepository(Database::getConnection()),
+                $root
+            );
+            $image = $service->getImage((int) $tournament['id'], $filename);
+
+            $this->assertNotNull($image);
+            $this->assertSame('image/jpeg', $image['mime_type']);
+            $this->assertSame('jpg-data', file_get_contents($image['path']));
+        } finally {
+            unlink($root . DIRECTORY_SEPARATOR . $filename);
+            rmdir($root);
+        }
+    }
+
     public function testNewAdministrativeEndpointsRequireAdminRole(): void
     {
         try {
@@ -1507,5 +1850,29 @@ class ApiTest extends TestCase
             $registrationByTeam[(int) $homeTeam['id']],
             $registrationByTeam[(int) $awayTeam['id']],
         ];
+    }
+
+    private function insertPublicGoal(PDO $pdo, int $matchId, int $tournamentPlayerId, int $creditedTeamId, string $goalType): void
+    {
+        $statement = $pdo->prepare(
+            'INSERT INTO match_goals (match_id, tournament_player_id, credited_to_team_id, goal_type, client_key)
+             VALUES (:match_id, :player_id, :team_id, :goal_type, :client_key)'
+        );
+        $statement->execute([
+            ':match_id' => $matchId,
+            ':player_id' => $tournamentPlayerId,
+            ':team_id' => $creditedTeamId,
+            ':goal_type' => $goalType,
+            ':client_key' => sprintf('%08x-%04x-%04x-%04x-%012x', random_int(0, 0xffffffff), random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0xffffffffffff)),
+        ]);
+    }
+
+    private function captureJsonResponse(callable $callback): array
+    {
+        ob_start();
+        $callback();
+        $body = (string) ob_get_clean();
+
+        return ['status' => http_response_code(), 'body' => json_decode($body, true, flags: JSON_THROW_ON_ERROR)];
     }
 }

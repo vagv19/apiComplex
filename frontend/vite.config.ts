@@ -14,8 +14,8 @@ export default defineConfig(({ mode }) => {
     base: process.env.FIGMA_PUBLIC_URL
       ? `${process.env.FIGMA_PUBLIC_URL}/`
       : mode === "production"
-        ? "/apiComplex/frontend/dist/"
-        : "/",
+        ? "/v2/"
+        : "/v2/",
     build: {
       sourcemap: emitSourcemaps ? "inline" : false,
       minify: !emitSourcemaps,
@@ -39,10 +39,10 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       proxy: {
         "/backend-api": {
-          target: "http://127.0.0.1",
+          target: "https://complex.vagv19.com",
           changeOrigin: true,
           rewrite: (path) =>
-            path.replace(/^\/backend-api/, "/apiComplex/backend/public"),
+            path.replace(/^\/backend-api/, "/backend/public"),
         },
       },
       watch: {
@@ -54,10 +54,10 @@ export default defineConfig(({ mode }) => {
       port: parseInt(process.env.PORT || "8443"),
       proxy: {
         "/backend-api": {
-          target: "http://127.0.0.1",
+          target: "https://complex.vagv19.com",
           changeOrigin: true,
           rewrite: (path) =>
-            path.replace(/^\/backend-api/, "/apiComplex/backend/public"),
+            path.replace(/^\/backend-api/, "/backend/public"),
         },
       },
     },

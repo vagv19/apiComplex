@@ -43,11 +43,151 @@ php -S 127.0.0.1:8000 public/index.php
 - `POST /api/v1/matches/{id}/result`
 - `POST /api/v1/matches/{id}/schedule`
 - `GET /api/v1/matches/by-date?date=YYYY-MM-DD`
+- `GET /api/v1/public/matches/first?date=YYYY-MM-DD`
 - `GET /api/v1/matches/{id}/report`
 - `POST /api/v1/matches/{id}/report`
 - `POST /api/v1/tournaments/{id}/status`
 - `POST /api/v1/tournaments/{id}/player-registration`
 - `POST /api/v1/expulsion-reasons/{id}`
+- `GET /api/v1/public/tournaments`
+- `GET /api/v1/public/tournaments/{id}/top-scorers`
+- `GET /api/v1/public/tournaments/{id}/images`
+- `GET /api/v1/public/tournaments/{id}/images/{filename}`
+
+### Torneos públicos activos
+
+`GET /api/v1/public/tournaments` devuelve la lista de torneos públicos activos,
+ordenados por estado y fecha de inicio. Por defecto incluye únicamente los
+registros con `status` en `REGISTRATION` o `IN_PROGRESS`; la respuesta usa la
+misma forma de paginación que el listado administrativo y es pública, sin
+requiere token.
+
+```http
+GET /api/v1/public/tournaments?page=1&limit=12
+```
+
+```json
+{
+  "success": true,
+  "message": "Torneos públicos consultados.",
+  "data": {
+    "items": [
+      {
+        "id": 12,
+        "category_id": 1,
+        "name": "Liga de otoño",
+        "format": "LEAGUE",
+        "status": "IN_PROGRESS",
+        "start_date": "2026-10-20",
+        "end_date": "2026-12-15"
+      }
+    ],
+    "page": 1,
+    "limit": 12,
+    "total": 1
+  }
+}
+```
+
+### Primer partido público del día
+
+`GET /api/v1/public/matches/first?date=YYYY-MM-DD` es una consulta pública sin
+autenticación. Devuelve el primer partido real de la fecha en torneos con
+inscripciones abiertas o en curso, ordenado por hora de inicio. Excluye
+descansos, partidos pospuestos y cancelados. Si no hay encuentros aplicables,
+`data` es `null`. La fecha es obligatoria y debe ser válida; de lo contrario,
+responde `422`.
+
+```http
+GET /api/v1/public/matches/first?date=2026-10-13
+```
+
+```json
+{
+  "success": true,
+  "message": "Primer partido de la fecha consultado.",
+  "data": {
+    "id": 24,
+    "match_date": "2026-10-13",
+    "kickoff_time": "16:30:00",
+    "venue": "Cancha 1",
+    "status": "SCHEDULED",
+    "home_score": null,
+    "away_score": null,
+    "home_team_name": "Equipo local",
+    "away_team_name": "Equipo visitante",
+    "tournament_name": "Liga de otoño"
+  }
+}
+```
+
+### Consultas públicas de goleadores e imágenes
+
+Estas consultas son públicas y no requieren bearer token. Los identificadores
+deben ser enteros positivos; un torneo inexistente responde `404` y un
+identificador inválido responde `422`.
+
+`GET /api/v1/public/tournaments/{id}/top-scorers` devuelve jugadores con goles
+individuales registrados en `match_goals` de partidos `COMPLETED`. Cuenta los
+tipos `REGULAR` y `PENALTY`, excluye `OWN_GOAL`, verifica que la inscripción
+pertenezca al torneo y a uno de los equipos participantes en el partido. Los
+empates comparten posición competitiva; el nombre solo determina su orden de
+presentación. `limit` es opcional, predeterminado a 20 y acepta valores de 1
+a 100.
+
+```http
+GET /api/v1/public/tournaments/15/top-scorers?limit=10
+```
+
+```json
+{
+  "success": true,
+  "message": "Tabla de goleadores consultada.",
+  "data": [
+    {
+      "position": 1,
+      "player_id": 23,
+      "player_name": "Juan Pérez",
+      "tournament_team_id": 7,
+      "team_name": "Deportivo",
+      "total_goals": 5
+    }
+  ]
+}
+```
+
+Un torneo existente sin goles elegibles responde `200` con `"data": []`.
+Un parámetro `limit` inválido responde `422`.
+
+`GET /api/v1/public/tournaments/{id}/images` enumera imágenes de
+`backend/img/tournament/{id}/`. Extensiones aceptadas (sin distinguir
+mayúsculas/minúsculas): JPG, JPEG, PNG, WEBP y GIF. Los archivos ocultos,
+temporales, enlaces simbólicos y archivos que no sean imágenes se excluyen.
+Un directorio inexistente o vacío responde `200` con una colección vacía.
+Cada `url` es una ruta pública relativa al mismo host y apunta al recurso de
+lectura controlada por la API:
+
+```json
+{
+  "success": true,
+  "message": "Galería consultada.",
+  "data": [
+    {
+      "tournament_id": 15,
+      "filename": "final.JPG",
+      "url": "/v2/backend/public/api/v1/public/tournaments/15/images/final.JPG"
+    }
+  ]
+}
+```
+
+`GET /api/v1/public/tournaments/{id}/images/{filename}` sirve exclusivamente
+un archivo de imagen permitido de la galería de ese torneo. No acepta rutas
+físicas ni nombres de archivo con separadores. Los fallos de lectura responden
+`500` sin exponer detalles internos.
+Además de los archivos ubicados en `backend/img/tournament/{id}/`, acepta
+`backend/img/tournament/{id}.jpg` cuando el nombre del archivo coincide
+exactamente con el identificador del torneo.
 
 ### Match scheduling and matches by day
 

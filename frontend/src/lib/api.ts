@@ -444,7 +444,7 @@ const apiBase =
   import.meta.env.VITE_API_BASE_URL ||
   (import.meta.env.DEV
     ? "/backend-api/api/v1"
-    : `${window.location.origin}/apiComplex/backend/public/api/v1`)
+    : `${window.location.origin}/backend/public/api/v1`)
 
 const authStorageKey = "sport-complex-admin-token"
 
