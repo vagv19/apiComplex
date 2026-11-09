@@ -19,10 +19,13 @@ The API is expected at:
 `http://127.0.0.1/apiComplex/backend/public/api/v1`
 
 During Vite development, requests use `/backend-api/api/v1` and are proxied to
-the XAMPP Apache server. This avoids browser CORS issues. To use another API
-host, define `VITE_API_BASE_URL` in a local Vite environment file, for example:
+the XAMPP Apache server. This avoids browser CORS issues. For local work, keep
+`API_PROXY_TARGET` aligned with the XAMPP host and also set
+`VITE_API_BASE_URL` when you want the browser to call the backend directly
+instead of going through the proxy. Example:
 
 ```dotenv
+API_PROXY_TARGET=http://localhost/apiComplex/
 VITE_API_BASE_URL=http://127.0.0.1/apiComplex/backend/public/api/v1
 ```
 

@@ -7,7 +7,12 @@ namespace App\Controllers;
 use App\Core\Request;
 use App\Core\Response;
 use App\Core\Validator;
+use App\Middleware\AuthMiddleware;
 use App\Repositories\PlayerRepository;
+use App\Services\PlayerPhotoService;
+use DomainException;
+use InvalidArgumentException;
+use RuntimeException;
 
 class PlayerController
 {
@@ -53,6 +58,59 @@ class PlayerController
         }
 
         Response::json(200, true, $player, 'Jugador consultado.');
+    }
+
+    public function uploadPhoto(Request $request, array $params): void
+    {
+        $user = AuthMiddleware::requireAuth($request->headers);
+        if (!in_array($user['role'] ?? null, ['admin', 'director_tecnico'], true)) {
+            throw new \App\Core\HttpException(403, 'Se requiere el rol de administrador o director técnico.');
+        }
+
+        $playerId = filter_var($params['id'] ?? null, FILTER_VALIDATE_INT);
+        if ($playerId === false || $playerId < 1) {
+            Response::json(422, false, null, 'El identificador del jugador no es válido.');
+            return;
+        }
+
+        if (($user['role'] ?? null) === 'director_tecnico') {
+            $directorUserId = filter_var($user['sub'] ?? null, FILTER_VALIDATE_INT);
+            if ($directorUserId === false || $directorUserId < 1) {
+                throw new \App\Core\HttpException(403, 'El identificador del director técnico no es válido.');
+            }
+
+            if ($this->repository->findById($playerId) === null) {
+                Response::json(404, false, null, 'Jugador no encontrado.');
+                return;
+            }
+
+            if (!$this->repository->isRegisteredToDirector($playerId, $directorUserId)) {
+                throw new \App\Core\HttpException(403, 'Solo puedes subir fotografías de jugadores registrados en tus equipos.');
+            }
+        }
+
+        try {
+            $player = (new PlayerPhotoService($this->repository))->upload($playerId, $_FILES['photo'] ?? []);
+        } catch (InvalidArgumentException $exception) {
+            Response::json(422, false, null, $exception->getMessage(), [
+                'photo' => [$exception->getMessage()],
+            ]);
+            return;
+        } catch (DomainException $exception) {
+            Response::json(409, false, null, $exception->getMessage());
+            return;
+        } catch (RuntimeException $exception) {
+            error_log($exception->getMessage());
+            Response::json(500, false, null, 'No fue posible guardar la fotografía.');
+            return;
+        }
+
+        if ($player === null) {
+            Response::json(404, false, null, 'Jugador no encontrado.');
+            return;
+        }
+
+        Response::json(200, true, $player, 'Fotografía del jugador guardada.');
     }
 
     public function update(Request $request, array $params): void

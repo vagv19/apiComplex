@@ -82,6 +82,44 @@ class PlayerRepository
         return $this->findById($id);
     }
 
+    public function setPhotoIfEmpty(int $id, string $filename): bool
+    {
+        $stmt = Database::getConnection()->prepare(
+            "UPDATE players
+             SET photo_url = :photo_url, updated_at = CURRENT_TIMESTAMP
+             WHERE id = :id AND is_active = 1 AND (photo_url IS NULL OR photo_url = '')"
+        );
+        $stmt->execute([
+            ':photo_url' => $filename,
+            ':id' => $id,
+        ]);
+        return $stmt->rowCount() > 0;
+    }
+
+    public function isRegisteredToDirector(int $playerId, int $directorUserId): bool
+    {
+        $stmt = Database::getConnection()->prepare(
+            "SELECT 1
+             FROM tournament_players tp
+             JOIN tournament_teams tt ON tt.id = tp.tournament_team_id
+             JOIN tournament_team_coaches c ON c.tournament_team_id = tt.id
+             JOIN users u ON u.id = c.user_id
+             WHERE tp.player_id = :player_id
+               AND tp.status = 'ACTIVE'
+               AND tt.status = 'ACTIVE'
+               AND c.user_id = :director_user_id
+               AND c.is_active = 1
+               AND u.role = 'director_tecnico'
+               AND u.is_active = 1
+             LIMIT 1"
+        );
+        $stmt->execute([
+            ':player_id' => $playerId,
+            ':director_user_id' => $directorUserId,
+        ]);
+        return $stmt->fetchColumn() !== false;
+    }
+
     public function softDelete(int $id): bool
     {
         $stmt = Database::getConnection()->prepare('UPDATE players SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = :id AND is_active = 1');

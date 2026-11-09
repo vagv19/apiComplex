@@ -34,9 +34,14 @@ class AuthMiddleware
 
     public static function requireAdmin(array $headers = []): array
     {
+        return self::requireRole($headers, 'admin', 'Se requiere permiso de administrador.');
+    }
+
+    public static function requireRole(array $headers, string $role, ?string $message = null): array
+    {
         $payload = self::requireAuth($headers);
-        if (($payload['role'] ?? null) !== 'admin') {
-            throw new HttpException(403, 'Se requiere permiso de administrador.');
+        if (($payload['role'] ?? null) !== $role) {
+            throw new HttpException(403, $message ?? 'No tienes permiso para realizar esta acción.');
         }
         return $payload;
     }

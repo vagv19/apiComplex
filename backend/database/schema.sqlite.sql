@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS tournaments (
     qualification_count INTEGER NOT NULL DEFAULT 8 CHECK (qualification_count BETWEEN 0 AND 255),
     player_registration_deadline INTEGER NOT NULL DEFAULT 4 CHECK (player_registration_deadline BETWEEN 0 AND 255),
     player_registration_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    player_registration_start_at DATETIME,
+    player_registration_end_at DATETIME,
     rules TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -76,6 +78,17 @@ CREATE TABLE IF NOT EXISTS tournament_teams (
     UNIQUE (tournament_id, seed_number),
     FOREIGN KEY (tournament_id) REFERENCES tournaments(id),
     FOREIGN KEY (team_id) REFERENCES teams(id)
+);
+
+CREATE TABLE IF NOT EXISTS tournament_team_coaches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tournament_team_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (tournament_team_id, user_id),
+    FOREIGN KEY (tournament_team_id) REFERENCES tournament_teams(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
 CREATE TABLE IF NOT EXISTS tournament_players (

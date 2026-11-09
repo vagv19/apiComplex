@@ -9,6 +9,7 @@ use App\Core\HttpException;
 use App\Controllers\MatchController;
 use App\Controllers\MatchReportController;
 use App\Controllers\FacilityController;
+use App\Controllers\PlayerController;
 use App\Controllers\PublicTournamentController;
 use App\Controllers\TournamentController;
 use App\Core\Request;
@@ -22,6 +23,7 @@ use App\Services\MatchResultService;
 use App\Services\MatchSheetPdfService;
 use App\Services\MatchSheetService;
 use App\Services\PublicTournamentService;
+use App\Services\PlayerPhotoService;
 use App\Services\FacilityService;
 use App\Services\TournamentFormatService;
 use PHPUnit\Framework\TestCase;
@@ -42,6 +44,7 @@ class ApiTest extends TestCase
         $pdo->exec('DELETE FROM group_teams');
         $pdo->exec('DELETE FROM tournament_groups');
         $pdo->exec('DELETE FROM tournament_stages');
+        $pdo->exec('DELETE FROM tournament_team_coaches');
         $pdo->exec('DELETE FROM tournament_players');
         $pdo->exec('DELETE FROM tournament_teams');
         $pdo->exec('DELETE FROM tournaments');
@@ -59,6 +62,7 @@ class ApiTest extends TestCase
         $pdo->exec("INSERT INTO players (id, first_name, last_name, is_active) VALUES (1, 'Player', 'One', 1)");
         $pdo->exec("INSERT INTO players (id, first_name, last_name, is_active) VALUES (2, 'Player', 'Two', 1)");
         $pdo->exec("INSERT INTO users (id, name, email, password_hash, role, is_active) VALUES (1, 'Admin', 'admin@example.com', '\$2y\$10\$ee8N2z6dE1IiFhQ8d7Gv0eCgg3i9ezVYk0rU7w2wZq3DgG1kP4lAq', 'admin', 1)");
+        $pdo->exec("INSERT INTO users (id, name, email, password_hash, role, is_active) VALUES (2, 'Director', 'director@example.com', '\$2y\$10\$ee8N2z6dE1IiFhQ8d7Gv0eCgg3i9ezVYk0rU7w2wZq3DgG1kP4lAq', 'director_tecnico', 1)");
     }
 
     public function testCatalogAndTournamentCrud(): void
@@ -99,6 +103,167 @@ class ApiTest extends TestCase
         $this->assertCount(1, $tournamentRepo->getTeamsForTournament((int) $tournament['id']));
     }
 
+    public function testPlayerPhotoUploadRequiresAdminAndValidImage(): void
+    {
+        $controller = new PlayerController();
+        $request = new Request('POST', '/api/v1/players/1/photo', [], [], []);
+
+        try {
+            $controller->uploadPhoto($request, ['id' => 1]);
+            self::fail('Unauthenticated photo upload must be rejected.');
+        } catch (HttpException $exception) {
+            $this->assertSame(401, $exception->statusCode);
+        }
+
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '1',
+            'role' => 'admin',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+        $request = new Request('POST', '/api/v1/players/1/photo', [], $headers, []);
+        $previousFiles = $_FILES;
+
+        try {
+            $_FILES = [];
+            ob_start();
+            $controller->uploadPhoto($request, ['id' => 1]);
+            $missingFileResponse = json_decode((string) ob_get_clean(), true);
+            $this->assertFalse($missingFileResponse['success']);
+            $this->assertSame(422, http_response_code());
+
+            $temporaryPath = tempnam(sys_get_temp_dir(), 'player-photo-invalid-');
+            self::assertNotFalse($temporaryPath);
+            file_put_contents($temporaryPath, 'not an image');
+            $_FILES = [
+                'photo' => [
+                    'name' => 'invalid.jpg',
+                    'type' => 'image/jpeg',
+                    'tmp_name' => $temporaryPath,
+                    'error' => UPLOAD_ERR_OK,
+                    'size' => filesize($temporaryPath),
+                ],
+            ];
+            ob_start();
+            $controller->uploadPhoto($request, ['id' => 1]);
+            $invalidImageResponse = json_decode((string) ob_get_clean(), true);
+            $this->assertFalse($invalidImageResponse['success']);
+            $this->assertSame(422, http_response_code());
+            $this->assertStringContainsString('imagen JPG, PNG o WEBP', $invalidImageResponse['message']);
+            $this->assertNull((new PlayerRepository())->findById(1)['photo_url']);
+        } finally {
+            $_FILES = $previousFiles;
+            if (isset($temporaryPath) && is_file($temporaryPath)) {
+                unlink($temporaryPath);
+            }
+        }
+    }
+
+    public function testDirectorCanUploadPhotosOnlyForPlayersOnAssignedTeams(): void
+    {
+        $tournamentRepository = new TournamentRepository();
+        $tournament = $tournamentRepository->create([
+            'name' => 'Director Photo League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Photo Team']);
+        $tournamentRepository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+        $this->assertTrue($tournamentRepository->assignDirectorToTeam(
+            (int) $tournament['id'],
+            (int) $team['id'],
+            2
+        ));
+        $player = (new PlayerRepository())->create(['first_name' => 'Assigned', 'last_name' => 'Player']);
+        $tournamentRepository->addPlayerToTournament(
+            (int) $tournament['id'],
+            (int) $team['id'],
+            (int) $player['id']
+        );
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '2',
+            'role' => 'director_tecnico',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+        $controller = new PlayerController();
+        $previousFiles = $_FILES;
+
+        try {
+            $_FILES = [];
+            ob_start();
+            $controller->uploadPhoto(
+                new Request('POST', '/api/v1/players/' . $player['id'] . '/photo', [], $headers, []),
+                ['id' => (int) $player['id']]
+            );
+            $allowedResponse = json_decode((string) ob_get_clean(), true);
+            $this->assertSame(422, http_response_code());
+            $this->assertFalse($allowedResponse['success']);
+            $this->assertSame('Selecciona una imagen para subir.', $allowedResponse['message']);
+
+            try {
+                $controller->uploadPhoto(
+                    new Request('POST', '/api/v1/players/2/photo', [], $headers, []),
+                    ['id' => 2]
+                );
+                self::fail('A director must not upload photos for players outside their assigned teams.');
+            } catch (HttpException $exception) {
+                $this->assertSame(403, $exception->statusCode);
+            }
+            $this->assertNull((new PlayerRepository())->findById(2)['photo_url']);
+        } finally {
+            $_FILES = $previousFiles;
+        }
+    }
+
+    public function testPlayerPhotoUploadStoresImageAndPersistsFilename(): void
+    {
+        $imageBytes = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', true);
+        self::assertNotFalse($imageBytes);
+
+        $temporaryPath = tempnam(sys_get_temp_dir(), 'player-photo-valid-');
+        self::assertNotFalse($temporaryPath);
+        file_put_contents($temporaryPath, $imageBytes);
+        $imageDirectory = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'player-photo-' . bin2hex(random_bytes(6));
+        self::assertTrue(mkdir($imageDirectory));
+
+        try {
+            $service = new PlayerPhotoService(
+                new PlayerRepository(),
+                $imageDirectory,
+                static fn (string $path): bool => true,
+                static fn (string $source, string $destination): bool => rename($source, $destination)
+            );
+            $updatedPlayer = $service->upload(1, [
+                'error' => UPLOAD_ERR_OK,
+                'tmp_name' => $temporaryPath,
+                'size' => strlen($imageBytes),
+            ]);
+
+            self::assertNotNull($updatedPlayer);
+            self::assertSame($updatedPlayer['photo_url'], basename($updatedPlayer['photo_url']));
+            self::assertMatchesRegularExpression('/^player-1-[a-f0-9]+\\.png$/', $updatedPlayer['photo_url']);
+            self::assertFileExists($imageDirectory . DIRECTORY_SEPARATOR . $updatedPlayer['photo_url']);
+            self::assertSame(
+                $updatedPlayer['photo_url'],
+                (new PlayerRepository())->findById(1)['photo_url']
+            );
+        } finally {
+            if (is_file($temporaryPath)) {
+                unlink($temporaryPath);
+            }
+            foreach (glob($imageDirectory . DIRECTORY_SEPARATOR . '*') ?: [] as $filePath) {
+                unlink($filePath);
+            }
+            rmdir($imageDirectory);
+        }
+    }
+
     public function testTournamentCreateRequiresAnExistingCategory(): void
     {
         ob_start();
@@ -122,7 +287,7 @@ class ApiTest extends TestCase
         $this->assertSame('Categoría no encontrada.', $unknownCategoryResponse['message']);
     }
 
-    public function testPlayerTournamentRegistrationDuplicatesArePrevented(): void
+    public function testPlayerTournamentRegistrationUsesItsConfiguredTimeWindow(): void
     {
         $tournamentRepo = new TournamentRepository();
         $tournament = $tournamentRepo->create([
@@ -132,6 +297,8 @@ class ApiTest extends TestCase
             'status' => 'REGISTRATION',
             'rounds_count' => 1,
             'player_registration_deadline_round' => 1,
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
         ]);
 
         $teamRepo = new TeamRepository();
@@ -142,17 +309,348 @@ class ApiTest extends TestCase
 
         $tournamentRepo->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
         $tournamentRepo->addTeamToTournament((int) $tournament['id'], (int) $secondTeam['id']);
+        (new ScheduleGeneratorService())->generateLeagueSchedule((int) $tournament['id']);
+        Database::getConnection()->exec("UPDATE matches SET status = 'COMPLETED', home_score = 0, away_score = 0");
+        Database::getConnection()->exec("UPDATE rounds SET status = 'COMPLETED'");
+        $tournamentRepo->update((int) $tournament['id'], [
+            'name' => $tournament['name'],
+            'status' => 'COMPLETED',
+            'allow_player_registration' => false,
+        ]);
         $this->assertTrue($tournamentRepo->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], (int) $player['id']));
         $this->assertFalse($tournamentRepo->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], (int) $player['id']));
         $roster = $tournamentRepo->getPlayersForTournament((int) $tournament['id']);
         $this->assertSame((int) $team['id'], (int) $roster[0]['team_id']);
         $this->assertGreaterThan(0, (int) $roster[0]['tournament_team_id']);
 
-        (new ScheduleGeneratorService())->generateLeagueSchedule((int) $tournament['id']);
-        Database::getConnection()->exec("UPDATE matches SET status = 'COMPLETED', home_score = 0, away_score = 0");
-        Database::getConnection()->exec("UPDATE rounds SET status = 'COMPLETED'");
+        $tournamentRepo->update((int) $tournament['id'], [
+            'name' => $tournament['name'],
+            'player_registration_end_at' => '2020-01-02 00:00:00',
+        ]);
         $this->expectException(\DomainException::class);
         $tournamentRepo->addPlayerToTournament((int) $tournament['id'], (int) $secondTeam['id'], 2);
+    }
+
+    public function testPlayerRegistrationRequiresBothWindowDatesAndRejectsFutureWindow(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Closed Registration League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Window Team']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+
+        try {
+            $repository->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], 1);
+            self::fail('A registration without a complete time window must be closed.');
+        } catch (\DomainException $exception) {
+            $this->assertStringContainsString('periodo configurado', $exception->getMessage());
+        }
+
+        $repository->update((int) $tournament['id'], [
+            'name' => $tournament['name'],
+            'player_registration_start_at' => '2099-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $this->expectException(\DomainException::class);
+        $repository->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], 1);
+    }
+
+    public function testTournamentRegistrationWindowFieldsAreValidatedAndReturned(): void
+    {
+        $controller = new TournamentController();
+        $validBody = [
+            'name' => 'Window Validation League',
+            'category_id' => 1,
+            'player_registration_start_at' => '2099-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ];
+
+        ob_start();
+        $controller->create(new Request('POST', '/api/v1/tournaments', [], [], $validBody), []);
+        $response = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(201, http_response_code());
+        $this->assertSame($validBody['player_registration_start_at'], $response['data']['player_registration_start_at']);
+        $this->assertSame($validBody['player_registration_end_at'], $response['data']['player_registration_end_at']);
+        $this->assertSame(0, (int) $response['data']['player_registration_open']);
+
+        ob_start();
+        $controller->update(
+            new Request('POST', '/api/v1/tournaments/' . $response['data']['id'], [], [], [
+                'name' => 'Window Validation League',
+                'player_registration_start_at' => 'not-a-date',
+            ]),
+            ['id' => (string) $response['data']['id']]
+        );
+        $invalidDateResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(422, http_response_code());
+        $this->assertArrayHasKey('player_registration_start_at', $invalidDateResponse['errors']);
+
+        ob_start();
+        $controller->update(
+            new Request('POST', '/api/v1/tournaments/' . $response['data']['id'], [], [], [
+                'name' => 'Window Validation League',
+                'player_registration_start_at' => '2099-12-31 23:59:59',
+                'player_registration_end_at' => '2099-01-01 00:00:00',
+            ]),
+            ['id' => (string) $response['data']['id']]
+        );
+        $invalidRangeResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(422, http_response_code());
+        $this->assertArrayHasKey('player_registration_end_at', $invalidRangeResponse['errors']);
+    }
+
+    public function testPlayerTournamentRegistrationPersistsJerseyAndRejectsDuplicateNumbers(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Jersey Number League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Jersey FC']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+
+        $this->assertTrue($repository->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], 1, 10));
+        $roster = $repository->getPlayersForTournament((int) $tournament['id']);
+        $this->assertCount(1, $roster);
+        $this->assertSame(10, (int) $roster[0]['jersey_number']);
+
+        $this->expectException(\DomainException::class);
+        $this->expectExceptionMessage('El número de camiseta ya está asignado');
+        $repository->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], 2, 10);
+    }
+
+    public function testPlayerTournamentRegistrationRejectsInvalidJerseyNumber(): void
+    {
+        $request = new Request(
+            'POST',
+            '/api/v1/tournaments/1/players',
+            [],
+            [],
+            ['team_id' => 1, 'player_id' => 1, 'jersey_number' => 65536]
+        );
+
+        ob_start();
+        (new TournamentController())->registerPlayer($request, ['id' => 1]);
+        $response = json_decode((string) ob_get_clean(), true);
+
+        $this->assertSame(422, http_response_code());
+        $this->assertFalse($response['success']);
+        $this->assertArrayHasKey('jersey_number', $response['errors']);
+    }
+
+    public function testDirectorCanLoadAndRegisterPlayersOnlyToAssignedTournamentTeam(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Director Roster League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Director Team']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+        $controller = new TournamentController();
+        $params = ['id' => (string) $tournament['id'], 'team_id' => (string) $team['id']];
+        $adminHeaders = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '1',
+            'role' => 'admin',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+        ob_start();
+        $controller->assignDirector(
+            new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/teams/' . $team['id'] . '/director', [], $adminHeaders, [
+                'director_user_id' => 2,
+            ]),
+            $params
+        );
+        $assignmentResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(200, http_response_code());
+        $this->assertSame(2, (int) $assignmentResponse['data']['user_id']);
+        $this->assertSame(1, (int) Database::getConnection()->query('SELECT is_active FROM tournament_team_coaches')->fetchColumn());
+
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '2',
+            'role' => 'director_tecnico',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+
+        ob_start();
+        $controller->myTeam(
+            new Request('GET', '/api/v1/tournaments/' . $tournament['id'] . '/my-team', [], $headers, []),
+            ['id' => (string) $tournament['id']]
+        );
+        $teamResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame('Director Team', $teamResponse['data']['team']['name']);
+        $this->assertSame([], $teamResponse['data']['players']);
+
+        ob_start();
+        $controller->registerPlayerForDirector(
+            new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/my-team/players', [], $headers, [
+                'first_name' => 'Assigned',
+                'last_name' => 'Player',
+                'birth_date' => '2000-01-02',
+                'jersey_number' => 8,
+                'team_id' => 999,
+            ]),
+            ['id' => (string) $tournament['id']]
+        );
+        $playerResponse = json_decode((string) ob_get_clean(), true);
+
+        $this->assertSame(201, http_response_code());
+        $this->assertSame('Director Team', $playerResponse['data']['team']['name']);
+        $this->assertCount(1, $playerResponse['data']['players']);
+        $this->assertSame(8, (int) $playerResponse['data']['players'][0]['jersey_number']);
+        $this->assertSame((int) $team['id'], (int) $playerResponse['data']['players'][0]['team_id']);
+        $this->assertSame(1, (int) Database::getConnection()->query("SELECT COUNT(*) FROM players WHERE first_name = 'Assigned' AND last_name = 'Player'")->fetchColumn());
+
+        ob_start();
+        $controller->registerPlayerForDirector(
+            new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/my-team/players', [], $headers, [
+                'first_name' => 'Duplicate',
+                'last_name' => 'Dorsal',
+                'jersey_number' => 8,
+            ]),
+            ['id' => (string) $tournament['id']]
+        );
+        $duplicateResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(409, http_response_code());
+        $this->assertFalse($duplicateResponse['success']);
+        $this->assertSame(0, (int) Database::getConnection()->query("SELECT COUNT(*) FROM players WHERE first_name = 'Duplicate'")->fetchColumn());
+    }
+
+    public function testOnlyAdministratorsCanAssignTournamentDirectors(): void
+    {
+        $tournament = (new TournamentRepository())->create([
+            'name' => 'Director Assignment Access',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Assignment Access Team']);
+        (new TournamentRepository())->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+        $coachHeaders = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '2',
+            'role' => 'director_tecnico',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+
+        try {
+            (new TournamentController())->assignDirector(
+                new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/teams/' . $team['id'] . '/director', [], $coachHeaders, [
+                    'director_user_id' => 2,
+                ]),
+                ['id' => (string) $tournament['id'], 'team_id' => (string) $team['id']]
+            );
+            self::fail('A director account must not assign tournament directors.');
+        } catch (HttpException $exception) {
+            $this->assertSame(403, $exception->statusCode);
+        }
+
+        $this->assertSame(0, (int) Database::getConnection()->query('SELECT COUNT(*) FROM tournament_team_coaches WHERE is_active = 1')->fetchColumn());
+    }
+
+    public function testAdministratorsCanUseDirectorRosterEndpointsWithTournamentTeamId(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Admin Roster Access',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Admin Managed Team']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '1',
+            'role' => 'admin',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+        $controller = new TournamentController();
+
+        ob_start();
+        $controller->myTeam(
+            new Request(
+                'GET',
+                '/api/v1/tournaments/' . $tournament['id'] . '/my-team',
+                ['team_id' => (int) $team['id']],
+                $headers,
+                []
+            ),
+            ['id' => (string) $tournament['id']]
+        );
+        $rosterResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(200, http_response_code());
+        $this->assertSame((int) $team['id'], (int) $rosterResponse['data']['team']['team_id']);
+
+        ob_start();
+        $controller->registerPlayerForDirector(
+            new Request(
+                'POST',
+                '/api/v1/tournaments/' . $tournament['id'] . '/my-team/players',
+                [],
+                $headers,
+                [
+                    'team_id' => (int) $team['id'],
+                    'first_name' => 'Admin',
+                    'last_name' => 'Added',
+                    'jersey_number' => 3,
+                ]
+            ),
+            ['id' => (string) $tournament['id']]
+        );
+        $createResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(201, http_response_code());
+        $this->assertSame((int) $team['id'], (int) $createResponse['data']['team']['team_id']);
+        $this->assertCount(1, $createResponse['data']['players']);
+    }
+
+    public function testDirectorCannotLoadTeamFromAnotherTournament(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Unassigned Director League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '2',
+            'role' => 'director_tecnico',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+
+        ob_start();
+        (new TournamentController())->myTeam(
+            new Request('GET', '/api/v1/tournaments/' . $tournament['id'] . '/my-team', [], $headers, []),
+            ['id' => (string) $tournament['id']]
+        );
+        $response = json_decode((string) ob_get_clean(), true);
+
+        $this->assertSame(404, http_response_code());
+        $this->assertFalse($response['success']);
+        $this->assertSame(0, (int) Database::getConnection()->query('SELECT COUNT(*) FROM tournament_players')->fetchColumn());
     }
 
     public function testScheduleGeneratorCreatesLeagueRounds(): void
@@ -1051,6 +1549,8 @@ class ApiTest extends TestCase
             'category_id' => 1,
             'format' => 'LEAGUE',
             'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
         ]);
         $foreignTeam = (new TeamRepository())->create(['name' => 'Foreign team']);
         $repository = new TournamentRepository();
@@ -1898,6 +2398,8 @@ class ApiTest extends TestCase
             'format' => 'LEAGUE',
             'status' => 'REGISTRATION',
             'rounds_count' => 1,
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
         ]);
         $homeTeam = (new TeamRepository())->create(['name' => $prefix . ' home']);
         $awayTeam = (new TeamRepository())->create(['name' => $prefix . ' away']);

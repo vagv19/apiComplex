@@ -1,2 +1,2 @@
 RewriteEngine On
-RewriteRule ^(?!public(?:/|$)).* - [F,L]
+RewriteRule ^(?!public(?:/|$)|img/players/[^/]+\.(?:jpe?g|png|gif|webp)$).* - [F,L,NC]

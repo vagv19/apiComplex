@@ -9,7 +9,7 @@ use PDO;
 
 final class PublicTournamentRepository
 {
-    private const SELECT_COLUMNS = 'id, category_id, name, tournament_type AS format, status, start_date, end_date, points_win AS points_for_win, points_draw AS points_for_draw, points_loss AS points_for_loss, regular_rounds AS rounds_count, qualification_count AS qualified_teams, rules AS tie_breakers, player_registration_deadline AS player_registration_deadline_round, player_registration_enabled AS allow_player_registration, created_at, updated_at';
+    private const SELECT_COLUMNS = 'id, category_id, name, tournament_type AS format, status, start_date, end_date, points_win AS points_for_win, points_draw AS points_for_draw, points_loss AS points_for_loss, regular_rounds AS rounds_count, qualification_count AS qualified_teams, rules AS tie_breakers, player_registration_deadline AS player_registration_deadline_round, player_registration_enabled AS allow_player_registration, player_registration_start_at, player_registration_end_at, CASE WHEN player_registration_start_at IS NOT NULL AND player_registration_end_at IS NOT NULL AND player_registration_start_at <= CURRENT_TIMESTAMP AND player_registration_end_at >= CURRENT_TIMESTAMP THEN 1 ELSE 0 END AS player_registration_open, created_at, updated_at';
 
     public function __construct(private readonly ?PDO $pdo = null)
     {

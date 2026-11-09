@@ -1,12 +1,39 @@
-import { defineConfig, type HtmlTagDescriptor, type Plugin } from "vite"
+import { defineConfig, loadEnv, type HtmlTagDescriptor, type Plugin } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "node:path"
 
 import siteConfiguration from "./.figma/make/site.json"
 
+function rewriteApiPath(requestPath: string): string {
+  const rewrittenPath = requestPath.replace(
+    /^\/backend-api/,
+    "/backend/public",
+  )
+  const originalPathname = requestPath.split("?")[0]
+  const rewrittenPathname = rewrittenPath.split("?")[0]
+
+  console.info(
+    `[vite] API proxy rewrite: ${originalPathname} -> ${rewrittenPathname}`,
+  )
+
+  return rewrittenPath
+}
+
 // Vite config — https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "")
+  const configuredApiBase = env.VITE_API_BASE_URL || env.API_PROXY_TARGET || "https://complex.vagv19.com"
+  const apiProxyTarget =
+    env.API_PROXY_TARGET ||
+    configuredApiBase.replace(/\/backend\/public\/api\/v1\/?$/, "/") ||
+    configuredApiBase.replace(/\/api\/v1\/?$/, "/") ||
+    "https://complex.vagv19.com"
+
+  if (mode === "development") {
+    console.info(`[vite] API_PROXY_TARGET resolved to: ${apiProxyTarget}`)
+  }
+
   // .figma/make/deploy-preview passes `--mode development` for cached-preview builds.
   const emitSourcemaps = mode === "development"
 
@@ -35,14 +62,30 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       host: process.env.FIGMA_DEV_SERVER_HOST || "0.0.0.0",
-      port: parseInt(process.env.PORT || "8443"),
+      port: parseInt(process.env.PORT || env.PORT || "8443"),
       strictPort: true,
       proxy: {
         "/backend-api": {
-          target: "https://complex.vagv19.com",
+          target: apiProxyTarget,
           changeOrigin: true,
-          rewrite: (path) =>
-            path.replace(/^\/backend-api/, "/backend/public"),
+          rewrite: rewriteApiPath,
+          configure: (proxy) => {
+            proxy.on("proxyReq", (_proxyRequest, request) => {
+              console.info(
+                `[vite] API proxy request sent: ${request.method} ${request.url?.split("?")[0]}`,
+              )
+            })
+            proxy.on("proxyRes", (response, request) => {
+              console.info(
+                `[vite] API proxy response: ${response.statusCode} ${request.url?.split("?")[0]}`,
+              )
+            })
+            proxy.on("error", (error, request) => {
+              console.error(
+                `[vite] API proxy error for ${request.url?.split("?")[0]}: ${error.message}`,
+              )
+            })
+          },
         },
       },
       watch: {
@@ -51,13 +94,12 @@ export default defineConfig(({ mode }) => {
     },
     preview: {
       host: process.env.FIGMA_DEV_SERVER_HOST || "0.0.0.0",
-      port: parseInt(process.env.PORT || "8443"),
+      port: parseInt(process.env.PORT || env.PORT || "8443"),
       proxy: {
         "/backend-api": {
-          target: "https://complex.vagv19.com",
+          target: apiProxyTarget,
           changeOrigin: true,
-          rewrite: (path) =>
-            path.replace(/^\/backend-api/, "/backend/public"),
+          rewrite: rewriteApiPath,
         },
       },
     },

@@ -38,6 +38,7 @@ return function (): Router {
     $router->get('/api/v1/players', [PlayerController::class, 'list']);
     $router->post('/api/v1/players', [PlayerController::class, 'create']);
     $router->get('/api/v1/players/{id}', [PlayerController::class, 'get']);
+    $router->post('/api/v1/players/{id}/photo', [PlayerController::class, 'uploadPhoto']);
     $router->post('/api/v1/players/{id}', [PlayerController::class, 'update']);
     $router->delete('/api/v1/players/{id}', [PlayerController::class, 'delete']);
     $router->get('/api/v1/players/{id}/history', [PlayerController::class, 'history']);
@@ -49,6 +50,9 @@ return function (): Router {
     $router->post('/api/v1/tournaments/{id}/status', [TournamentController::class, 'status']);
     $router->post('/api/v1/tournaments/{id}/teams', [TournamentController::class, 'registerTeam']);
     $router->get('/api/v1/tournaments/{id}/teams', [TournamentController::class, 'teams']);
+    $router->post('/api/v1/tournaments/{id}/teams/{team_id}/director', [TournamentController::class, 'assignDirector']);
+    $router->get('/api/v1/tournaments/{id}/my-team', [TournamentController::class, 'myTeam']);
+    $router->post('/api/v1/tournaments/{id}/my-team/players', [TournamentController::class, 'registerPlayerForDirector']);
     $router->post('/api/v1/tournaments/{id}/players', [TournamentController::class, 'registerPlayer']);
     $router->get('/api/v1/tournaments/{id}/players', [TournamentController::class, 'players']);
     $router->post('/api/v1/tournaments/{id}/player-registration', [TournamentController::class, 'togglePlayerRegistration']);

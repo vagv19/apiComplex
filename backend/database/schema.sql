@@ -4,6 +4,17 @@ CREATE DATABASE IF NOT EXISTS bdcomplex_v2
 
 USE bdcomplex_v2;
 
+CREATE TABLE IF NOT EXISTS users (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(120) NOT NULL,
+    email VARCHAR(150) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(30) NOT NULL DEFAULT 'admin',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
 CREATE TABLE categories (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
@@ -55,6 +66,8 @@ CREATE TABLE tournaments (
     qualification_count TINYINT UNSIGNED NOT NULL DEFAULT 8,
     player_registration_deadline TINYINT UNSIGNED NOT NULL DEFAULT 4,
     player_registration_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    player_registration_start_at DATETIME NULL,
+    player_registration_end_at DATETIME NULL,
     rules JSON NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -74,6 +87,18 @@ CREATE TABLE tournament_teams (
     UNIQUE KEY uq_seed (tournament_id, seed_number),
     CONSTRAINT fk_tt_tournament FOREIGN KEY (tournament_id) REFERENCES tournaments(id),
     CONSTRAINT fk_tt_team FOREIGN KEY (team_id) REFERENCES teams(id)
+);
+
+CREATE TABLE tournament_team_coaches (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tournament_team_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    assigned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_tournament_team_coach (tournament_team_id, user_id),
+    INDEX idx_team_coach_user_active (user_id, is_active),
+    CONSTRAINT fk_ttc_tournament_team FOREIGN KEY (tournament_team_id) REFERENCES tournament_teams(id),
+    CONSTRAINT fk_ttc_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
 CREATE TABLE tournament_players (

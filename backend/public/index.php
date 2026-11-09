@@ -35,6 +35,7 @@ require_once __DIR__ . '/../src/Services/ScheduleAlgorithms.php';
 require_once __DIR__ . '/../src/Services/TournamentFormatService.php';
 require_once __DIR__ . '/../src/Services/StandingsService.php';
 require_once __DIR__ . '/../src/Services/PublicTournamentService.php';
+require_once __DIR__ . '/../src/Services/PlayerPhotoService.php';
 require_once __DIR__ . '/../src/Services/FacilityService.php';
 require_once __DIR__ . '/../src/Services/QualificationService.php';
 require_once __DIR__ . '/../src/Services/MatchResultService.php';

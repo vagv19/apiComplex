@@ -16,7 +16,7 @@ Backend REST API for tournament administration built in native PHP and PDO.
 1. Copy `.env.example` to `.env` and set the existing MySQL database name and credentials.
 2. For a new database, run `database/schema.sql` once; it creates the `football_tournaments` database and tables.
 3. The SQLite schema at `database/schema.sqlite.sql` is used only for local tests.
-4. Apply `database/migrations/001_create_users.sql` and create an administrator account before using the admin application. For an existing tournament database, apply `database/migrations/002_match_details_and_discipline.sql`; if its match-report tables predate the current API schema, also apply `database/migrations/003_repair_existing_match_report_schema.sql` followed by `database/migrations/004_align_match_report_to_attached_schema.sql`.
+4. Apply `database/migrations/001_create_users.sql` and create an administrator account before using the admin application. For an existing tournament database, apply `database/migrations/005_assign_director_to_tournament_team.sql` and then `database/migrations/006_use_tournament_team_coaches.sql`; the latter migrates assignments from the earlier `director_user_id` column when present. Apply `database/migrations/007_player_registration_window.sql` to add the registration timestamps if they are not already present. Apply `database/migrations/002_match_details_and_discipline.sql`; if its match-report tables predate the current API schema, also apply `database/migrations/003_repair_existing_match_report_schema.sql` followed by `database/migrations/004_align_match_report_to_attached_schema.sql`.
 5. Optionally populate seed data from `database/seeders/initial_data.sql` in the SQLite test database.
 6. With XAMPP running, access the API at:
 
@@ -37,9 +37,16 @@ php -S 127.0.0.1:8000 public/index.php
 
 - `GET /api/v1/categories`
 - `POST /api/v1/teams`
+- `POST /api/v1/players/{id}/photo`
 - `GET /api/v1/tournaments`
 - `POST /api/v1/tournaments`
 - `POST /api/v1/tournaments/{id}/teams`
+- `GET /api/v1/tournaments/{id}/teams`
+- `POST /api/v1/tournaments/{id}/teams/{team_id}/director`
+- `GET /api/v1/tournaments/{id}/my-team`
+- `POST /api/v1/tournaments/{id}/my-team/players`
+- `GET /api/v1/tournaments/{id}/players`
+- `POST /api/v1/tournaments/{id}/players`
 - `POST /api/v1/matches/{id}/result`
 - `POST /api/v1/matches/{id}/schedule`
 - `GET /api/v1/matches/by-date?date=YYYY-MM-DD`
@@ -55,6 +62,96 @@ php -S 127.0.0.1:8000 public/index.php
 - `GET /api/v1/public/tournaments/{id}/top-scorers`
 - `GET /api/v1/public/tournaments/{id}/images`
 - `GET /api/v1/public/tournaments/{id}/images/{filename}`
+
+### Upload a player photo
+
+`POST /api/v1/players/{id}/photo` requires an administrator or director
+technician bearer token and a `multipart/form-data` file field named `photo`.
+Directors may upload only photos for players actively registered to a team
+assigned to them; administrators may upload for any player. The endpoint
+accepts JPEG, PNG, and WEBP images up to 5 MB. It is intended for players
+without an existing photo; attempts to upload a second photo return `409`.
+The stored filename is saved to the player's `photo_url` and the file is served
+from `/backend/img/players/{filename}`.
+
+```bash
+curl -X POST http://127.0.0.1/apiComplex/backend/public/api/v1/players/42/photo \
+  -H "Authorization: Bearer <admin-token>" \
+  -F "photo=@player.jpg"
+```
+
+Success returns HTTP `200` with the updated player in `data`. Invalid or missing
+images return `422`; unauthenticated/unauthorized requests return `401`/`403`;
+unknown players return `404`; players that already have a photo return `409`.
+
+### Register a tournament player
+
+Create a player in the permanent catalogue with `POST /api/v1/players`
+(`first_name`, `last_name`, and optional `birth_date`, `phone`, and `email`),
+then register that player to an active tournament team with
+`POST /api/v1/tournaments/{id}/players`. Use
+`GET /api/v1/tournaments/{id}/teams` to list selectable teams. The registration
+request requires `team_id` and `player_id`; the optional `jersey_number` must be
+an integer from 0 to 65535 and must be unique within that tournament team.
+The registration endpoint enforces the tournament's player-registration
+settings and cutoff and returns the tournament roster in `data`.
+
+```json
+{
+  "team_id": 12,
+  "player_id": 42,
+  "jersey_number": 10
+}
+```
+
+```http
+POST /api/v1/tournaments/7/players
+Content-Type: application/json
+```
+
+Success returns HTTP `201` with the standard
+`{"success":true,"message":"...","data":[...]}` response; each roster record
+includes the registration, team, and player profile fields. Re-registering an
+already registered player returns HTTP `200` and the current roster.
+
+Invalid fields return `422`; a closed registration, duplicate jersey, or other
+business-rule conflict returns `409`; a missing tournament or player returns
+`404`. Player creation and tournament registration run in a single transaction.
+
+### Director-to-team assignment
+
+The `tournament_team_coaches` relation stores `id`, `tournament_team_id`,
+`user_id`, `is_active`, and `assigned_at`. Each active tournament team can have
+one active account with the `director_tecnico` role, and each director can
+manage at most one team per tournament. An administrator assigns the director
+after the team is enrolled:
+
+```http
+POST /api/v1/tournaments/7/teams/12/director
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{"director_user_id": 5}
+```
+
+The director portal does not send a team or director ID when loading or adding
+players. It uses the authenticated token's subject to resolve the assigned team
+for the selected tournament:
+
+- `GET /api/v1/tournaments/{id}/my-team` accepts `director_tecnico` and `admin`
+  tokens and returns `data.team` and that team's `data.players`. A director's
+  team is derived from the token; an administrator must pass `team_id` as a
+  query parameter.
+- `POST /api/v1/tournaments/{id}/my-team/players` accepts the same roles and
+  player profile fields plus `jersey_number`. Catalog creation and tournament
+  registration run in one transaction. A director's team is derived from the
+  token and ignores any submitted `team_id`; an administrator must send the
+  target `team_id` in the JSON body.
+
+An unassigned director receives `404`; a closed registration, duplicate jersey,
+or conflicting assignment receives `409`. Invalid or missing admin team IDs
+and invalid player fields return `422`; callers without the required role
+receive `401` or `403`.
 
 ### Torneos públicos activos
 
@@ -268,9 +365,10 @@ league in draft status.
   "status": "REGISTRATION",
   "start_date": "2026-10-20",
   "end_date": "2026-12-15",
+  "player_registration_start_at": "2026-10-01 00:00:00",
+  "player_registration_end_at": "2026-10-20 23:59:59",
   "rounds_count": 10,
   "qualified_teams": 8,
-  "player_registration_deadline_round": 4,
   "points_for_win": 3,
   "points_for_draw": 1,
   "points_for_loss": 0
@@ -285,6 +383,14 @@ The PDO repository maps these API names to the installed MySQL tournament
 columns (`tournament_type`, `points_win`, `regular_rounds`, and related
 columns), so API names remain consistent for the frontend.
 
+Player enrollment is controlled only by `player_registration_start_at` and
+`player_registration_end_at`, in the `YYYY-MM-DD HH:MM:SS` format. Both values
+must be set and the current database time must be inside the inclusive range.
+If either value is `null`, registration is closed. Tournament status,
+`allow_player_registration`, and `player_registration_deadline_round` do not
+affect enrollment. The create response and tournament listings include both
+timestamps and a computed `player_registration_open` boolean.
+
 The application currently preserves the database selected by an existing
 `.env`; it does not create, switch, or migrate a live database automatically.
 Do not change an existing `DB_NAME` to `football_tournaments` unless that
@@ -295,11 +401,16 @@ database has been created and its data has been verified.
 Tournament status and player-registration settings are updated with `POST`:
 
 - `POST /api/v1/tournaments/{id}/status` accepts `{"status":"IN_PROGRESS"}`.
+- `POST /api/v1/tournaments/{id}` accepts the tournament fields, including
+  `name` and either or both registration timestamps. When only one timestamp
+  changes, the resulting start must not be later than the resulting end.
 - `POST /api/v1/tournaments/{id}/player-registration` accepts
   `{"allow_player_registration":false}`; omitting the field toggles the setting.
 
-These routes keep their existing validation and domain rules; only the HTTP
-method is `POST`.
+The player-registration setting route remains for compatibility, but its
+legacy flag no longer opens or closes enrollment. Only the configured time
+window is enforced. An enrollment attempt outside that window returns `409`.
+Invalid date formats or a reversed range return `422`.
 
 ## Current format support
 

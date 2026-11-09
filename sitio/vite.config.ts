@@ -39,7 +39,7 @@ react(),
       strictPort: true,
       proxy: {
         '/backend-api': {
-          target: 'http://192.168.25.1/apiComplex',
+          target: process.env.API_PROXY_TARGET || 'https://complex.vagv19.com',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/backend-api/, '/backend/public'),
         },
@@ -55,7 +55,7 @@ react(),
       port: parseInt(process.env.PORT || '8444'),
       proxy: {
         '/backend-api': {
-          target: 'http://192.168.25.1/apiComplex',
+          target: process.env.API_PROXY_TARGET || 'https://complex.vagv19.com',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/backend-api/, '/backend/public'),
         },
