@@ -6,6 +6,7 @@ namespace App\Controllers;
 
 use App\Core\Request;
 use App\Core\Response;
+use App\Middleware\AuthMiddleware;
 use App\Services\MatchResultService;
 
 class MatchController
@@ -16,6 +17,10 @@ class MatchController
 
     public function result(Request $request, array $params): void
     {
+        $actor = AuthMiddleware::requireCapability(
+            $request->headers,
+            'matches.results.manage',
+        );
         $homeScore = filter_var($request->body['home_score'] ?? null, FILTER_VALIDATE_INT);
         $awayScore = filter_var($request->body['away_score'] ?? null, FILTER_VALIDATE_INT);
         if ($homeScore === false || $awayScore === false || $homeScore < 0 || $awayScore < 0 || $homeScore > 65535 || $awayScore > 65535) {
@@ -35,7 +40,17 @@ class MatchController
         }
 
         try {
-            $result = $this->service->recordResult((int) $params['id'], $homeScore, $awayScore, null, $reason, $homePenalties, $awayPenalties);
+            $result = $this->service->recordResult(
+                (int) $params['id'],
+                $homeScore,
+                $awayScore,
+                (int) $actor['sub'],
+                $reason,
+                $homePenalties,
+                $awayPenalties,
+                (string) $actor['role'],
+                filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP) ?: null,
+            );
             Response::json(200, true, $result, 'Resultado registrado.');
         } catch (\DomainException $exception) {
             $notFound = str_contains($exception->getMessage(), 'no encontrado');

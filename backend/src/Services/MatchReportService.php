@@ -54,7 +54,13 @@ final class MatchReportService
         ];
     }
 
-    public function saveMatchReport(int $matchId, array $report, ?int $changedBy): array
+    public function saveMatchReport(
+        int $matchId,
+        array $report,
+        ?int $changedBy,
+        ?string $changedByRole = null,
+        ?string $ipAddress = null,
+    ): array
     {
         $pdo = Database::getConnection();
         $pdo->beginTransaction();
@@ -100,6 +106,8 @@ final class MatchReportService
                 (string) ($report['reason'] ?? 'Resultado actualizado'),
                 $report['home_penalties'] ?? null,
                 $report['away_penalties'] ?? null,
+                $changedByRole,
+                $ipAddress,
             );
 
             if ($hasPlayerDetails) {

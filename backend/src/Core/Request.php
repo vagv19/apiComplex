@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Core;
 
+use JsonException;
+
 class Request
 {
     public function __construct(
@@ -51,11 +53,32 @@ class Request
         $body = [];
         $rawInput = file_get_contents('php://input');
         if (is_string($rawInput) && $rawInput !== '') {
-            $decoded = json_decode($rawInput, true);
-            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            $contentType = '';
+            foreach ($headers as $name => $value) {
+                if (strtolower((string) $name) === 'content-type' && is_string($value)) {
+                    $contentType = strtolower(trim(strtok($value, ';')));
+                    break;
+                }
+            }
+            if ($contentType === '') {
+                $rawContentType = (string) ($_SERVER['CONTENT_TYPE'] ?? '');
+                $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
+            }
+
+            if ($contentType === 'application/json') {
+                try {
+                    $decoded = json_decode($rawInput, true, 512, JSON_THROW_ON_ERROR);
+                } catch (JsonException) {
+                    throw new HttpException(400, 'El cuerpo JSON no es válido.');
+                }
+                if (!is_array($decoded) || !str_starts_with(ltrim($rawInput), '{')) {
+                    throw new HttpException(400, 'El cuerpo JSON debe ser un objeto.');
+                }
                 $body = $decoded;
-            } else {
+            } elseif ($contentType === 'application/x-www-form-urlencoded') {
                 parse_str($rawInput, $body);
+            } elseif ($contentType !== 'multipart/form-data') {
+                throw new HttpException(415, 'El cuerpo debe usar application/json.');
             }
         }
 

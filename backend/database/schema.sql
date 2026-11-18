@@ -9,11 +9,93 @@ CREATE TABLE IF NOT EXISTS users (
     name VARCHAR(120) NOT NULL,
     email VARCHAR(150) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
-    role VARCHAR(30) NOT NULL DEFAULT 'admin',
+    role VARCHAR(30) NOT NULL,
+    auth_version INT UNSIGNED NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    deleted_at DATETIME NULL,
+    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+
+CREATE TABLE system_modules (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(80) NOT NULL UNIQUE,
+    name VARCHAR(120) NOT NULL,
+    description VARCHAR(255) NULL,
+    parent_id BIGINT UNSIGNED NULL,
+    route VARCHAR(160) NULL,
+    icon VARCHAR(50) NULL,
+    sort_order SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_system_modules_parent FOREIGN KEY (parent_id) REFERENCES system_modules(id) ON DELETE SET NULL
+);
+
+CREATE TABLE user_modules (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL,
+    module_id BIGINT UNSIGNED NOT NULL,
+    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_user_module (user_id, module_id),
+    INDEX idx_user_modules_module (module_id, is_enabled),
+    CONSTRAINT fk_user_modules_user FOREIGN KEY (user_id) REFERENCES users(id),
+    CONSTRAINT fk_user_modules_module FOREIGN KEY (module_id) REFERENCES system_modules(id)
+);
+
+INSERT INTO system_modules (code, name, description, route, icon, sort_order) VALUES
+    ('dashboard', 'Resumen', 'Resumen general del sistema.', '/', 'home', 10),
+    ('tournaments', 'Torneos', 'Administración de torneos.', '/tournaments', 'trophy', 20),
+    ('categories', 'Categorías', 'Administración de categorías.', '/categories', 'categories', 30),
+    ('teams', 'Equipos', 'Catálogo y equipos asignados.', '/teams', 'flag', 40),
+    ('players', 'Jugadores', 'Catálogo de jugadores.', '/players', 'player', 50),
+    ('rosters', 'Plantillas', 'Plantillas y registros de torneo.', '/rosters', 'roster', 60),
+    ('schedule', 'Calendario', 'Jornadas y programación.', '/schedule', 'calendar', 70),
+    ('matchday', 'Partidos del día', 'Consulta de partidos por fecha.', '/matchday', 'clock', 80),
+    ('results', 'Resultados', 'Captura de resultados y cédulas.', '/results', 'score', 90),
+    ('standings', 'Posiciones', 'Tablas de posiciones.', '/standings', 'table', 100),
+    ('discipline', 'Disciplina', 'Motivos de expulsión y sanciones.', '/discipline', 'warning', 110),
+    ('users', 'Usuarios y accesos', 'Usuarios, roles y módulos.', '/users', 'users', 120),
+    ('audit', 'Auditoría', 'Historial de operaciones administrativas.', '/audit', 'history', 130)
+ON DUPLICATE KEY UPDATE
+    name = VALUES(name),
+    description = VALUES(description),
+    route = VALUES(route),
+    icon = VALUES(icon),
+    sort_order = VALUES(sort_order);
+
+CREATE TABLE admin_audit_log (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    actor_user_id BIGINT UNSIGNED NULL,
+    actor_role VARCHAR(30) NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    entity_id VARCHAR(80) NULL,
+    tournament_id BIGINT UNSIGNED NULL,
+    reason VARCHAR(500) NULL,
+    old_values JSON NULL,
+    new_values JSON NULL,
+    ip_address VARCHAR(45) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_audit_actor FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    INDEX idx_audit_created (created_at),
+    INDEX idx_audit_tournament_created (tournament_id, created_at),
+    INDEX idx_audit_entity (entity_type, entity_id)
+);
+
+DELIMITER //
+CREATE TRIGGER trg_users_auth_version
+BEFORE UPDATE ON users
+FOR EACH ROW
+BEGIN
+    IF NEW.role <> OLD.role OR NEW.is_active <> OLD.is_active OR NOT (NEW.deleted_at <=> OLD.deleted_at) THEN
+        SET NEW.auth_version = OLD.auth_version + 1;
+    END IF;
+END//
+DELIMITER ;
 
 CREATE TABLE categories (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

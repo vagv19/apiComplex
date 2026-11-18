@@ -1,3 +1,13 @@
+# Ignorar todo el proyecto
+*
+
+# Permitir únicamente backend
+!backend/
+!backend/**
+
+# Mantener .gitignore
+!.gitignore
+
 backend/vendor/
 backend/composer.lock
 backend/.env

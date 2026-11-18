@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Repositories;
 
 use App\Config\Database;
+use App\Repositories\AdminAuditRepository;
+use App\Services\PlayerRegistrationPolicy;
 use PDO;
 
 class TournamentRepository
@@ -27,6 +29,33 @@ class TournamentRepository
         ];
     }
 
+    public function listForDirector(int $directorUserId, int $page = 1, int $limit = 15): array
+    {
+        $pdo = Database::getConnection();
+        $scope = " WHERE id IN (
+            SELECT DISTINCT tt.tournament_id
+            FROM tournament_team_coaches c
+            JOIN tournament_teams tt ON tt.id = c.tournament_team_id
+            WHERE c.user_id = :user_id AND c.is_active = 1 AND tt.status = 'ACTIVE'
+        )";
+        $count = $pdo->prepare('SELECT COUNT(*) FROM tournaments' . $scope);
+        $count->execute([':user_id' => $directorUserId]);
+        $stmt = $pdo->prepare(
+            'SELECT ' . self::SELECT_COLUMNS . ' FROM tournaments' . $scope
+            . ' ORDER BY id DESC LIMIT :limit OFFSET :offset',
+        );
+        $stmt->bindValue(':user_id', $directorUserId, PDO::PARAM_INT);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->bindValue(':offset', ($page - 1) * $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        return [
+            'items' => $stmt->fetchAll(),
+            'page' => $page,
+            'limit' => $limit,
+            'total' => (int) $count->fetchColumn(),
+        ];
+    }
+
     public function findById(int $id): ?array
     {
         $stmt = Database::getConnection()->prepare('SELECT ' . self::SELECT_COLUMNS . ' FROM tournaments WHERE id = :id LIMIT 1');
@@ -36,6 +65,13 @@ class TournamentRepository
 
     public function create(array $data): array
     {
+        if (
+            !array_key_exists('player_registration_start_at', $data)
+            && !array_key_exists('player_registration_end_at', $data)
+        ) {
+            $data = [...$data, ...PlayerRegistrationPolicy::defaultWindow()];
+        }
+
         $pdo = Database::getConnection();
         $stmt = $pdo->prepare('INSERT INTO tournaments (name, category_id, tournament_type, status, start_date, end_date, points_win, points_draw, points_loss, regular_rounds, qualification_count, rules, player_registration_deadline, player_registration_enabled, player_registration_start_at, player_registration_end_at) VALUES (:name, :category_id, :format, :status, :start_date, :end_date, :points_for_win, :points_for_draw, :points_for_loss, :rounds_count, :qualified_teams, :tie_breakers, :player_registration_deadline_round, :allow_player_registration, :player_registration_start_at, :player_registration_end_at)');
         $stmt->execute($this->tournamentValues($data));
@@ -335,7 +371,7 @@ class TournamentRepository
                 }
             }
 
-            $this->assertPlayerRegistrationOpen($pdo, $tournamentId);
+            (new PlayerRegistrationPolicy())->assertAllowed($pdo, $tournamentId);
 
             $teamSql = "SELECT tt.id FROM tournament_teams tt
                         WHERE tt.tournament_id = :tournament_id
@@ -428,12 +464,22 @@ class TournamentRepository
         }
     }
 
-    public function addPlayerToTournament(int $tournamentId, int $teamId, int $playerId, ?int $jerseyNumber = null): bool
+    public function addPlayerToTournament(
+        int $tournamentId,
+        int $teamId,
+        int $playerId,
+        ?int $jerseyNumber = null,
+        ?array $overrideAudit = null,
+    ): bool
     {
         $pdo = Database::getConnection();
         $pdo->beginTransaction();
         try {
-            $this->assertPlayerRegistrationOpen($pdo, $tournamentId);
+            (new PlayerRegistrationPolicy())->assertAllowed(
+                $pdo,
+                $tournamentId,
+                $overrideAudit !== null,
+            );
 
             $teamQuery = $pdo->prepare('SELECT id FROM tournament_teams WHERE tournament_id = :tournament_id AND team_id = :team_id AND status = :status');
             $teamQuery->execute([':tournament_id' => $tournamentId, ':team_id' => $teamId, ':status' => 'ACTIVE']);
@@ -474,8 +520,186 @@ class TournamentRepository
                 ':jersey_number' => $jerseyNumber,
                 ':status' => 'ACTIVE',
             ]);
+            if ($overrideAudit !== null) {
+                (new AdminAuditRepository())->record($pdo, [
+                    ...$overrideAudit,
+                    'action' => 'players.registration.override',
+                    'entity_type' => 'tournament_player',
+                    'entity_id' => (int) $pdo->lastInsertId(),
+                    'tournament_id' => $tournamentId,
+                    'new_values' => [
+                        'tournament_id' => $tournamentId,
+                        'team_id' => $teamId,
+                        'tournament_team_id' => (int) $tournamentTeamId,
+                        'player_id' => $playerId,
+                        'jersey_number' => $jerseyNumber,
+                    ],
+                ]);
+            }
             $pdo->commit();
             return true;
+        } catch (\Throwable $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $exception;
+        }
+    }
+
+    public function addPlayersToTournament(
+        int $tournamentId,
+        int $teamId,
+        array $playerIds,
+        ?array $overrideAudit = null,
+    ): int {
+        if ($playerIds === [] || count(array_unique($playerIds)) !== count($playerIds)) {
+            throw new \InvalidArgumentException('Selecciona al menos un jugador y no repitas jugadores.');
+        }
+
+        $pdo = Database::getConnection();
+        $pdo->beginTransaction();
+        try {
+            (new PlayerRegistrationPolicy())->assertAllowed(
+                $pdo,
+                $tournamentId,
+                $overrideAudit !== null,
+            );
+
+            $teamQuery = $pdo->prepare(
+                'SELECT id FROM tournament_teams
+                 WHERE tournament_id = :tournament_id AND team_id = :team_id AND status = :status',
+            );
+            $teamQuery->execute([
+                ':tournament_id' => $tournamentId,
+                ':team_id' => $teamId,
+                ':status' => 'ACTIVE',
+            ]);
+            $tournamentTeamId = $teamQuery->fetchColumn();
+            if ($tournamentTeamId === false) {
+                throw new \DomainException('El equipo no está inscrito activamente en este torneo.');
+            }
+
+            $created = 0;
+            foreach ($playerIds as $playerId) {
+                $playerQuery = $pdo->prepare('SELECT id FROM players WHERE id = :id AND is_active = 1');
+                $playerQuery->execute([':id' => $playerId]);
+                if ($playerQuery->fetchColumn() === false) {
+                    throw new \DomainException('Jugador no encontrado o inactivo.');
+                }
+
+                $exists = $pdo->prepare(
+                    'SELECT id FROM tournament_players
+                     WHERE tournament_id = :tournament_id AND player_id = :player_id',
+                );
+                $exists->execute([':tournament_id' => $tournamentId, ':player_id' => $playerId]);
+                if ($exists->fetchColumn() !== false) {
+                    throw new \DomainException('Uno o más jugadores ya están inscritos en este torneo.');
+                }
+
+                $insert = $pdo->prepare(
+                    "INSERT INTO tournament_players
+                        (tournament_id, tournament_team_id, player_id, jersey_number, status)
+                     VALUES (:tournament_id, :tournament_team_id, :player_id, NULL, 'ACTIVE')",
+                );
+                $insert->execute([
+                    ':tournament_id' => $tournamentId,
+                    ':tournament_team_id' => (int) $tournamentTeamId,
+                    ':player_id' => $playerId,
+                ]);
+                $registrationId = (int) $pdo->lastInsertId();
+
+                if ($overrideAudit !== null) {
+                    (new AdminAuditRepository())->record($pdo, [
+                        ...$overrideAudit,
+                        'action' => 'players.registration.override',
+                        'entity_type' => 'tournament_player',
+                        'entity_id' => $registrationId,
+                        'tournament_id' => $tournamentId,
+                        'new_values' => [
+                            'tournament_id' => $tournamentId,
+                            'team_id' => $teamId,
+                            'tournament_team_id' => (int) $tournamentTeamId,
+                            'player_id' => $playerId,
+                            'jersey_number' => null,
+                        ],
+                    ]);
+                }
+                $created++;
+            }
+
+            $pdo->commit();
+            return $created;
+        } catch (\Throwable $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $exception;
+        }
+    }
+
+    public function deleteTournamentPlayerRegistration(int $tournamentId, int $registrationId): bool
+    {
+        $pdo = Database::getConnection();
+        $pdo->beginTransaction();
+
+        try {
+            $registration = $pdo->prepare(
+                'SELECT id FROM tournament_players
+                 WHERE id = :registration_id AND tournament_id = :tournament_id
+                 LIMIT 1',
+            );
+            $registration->execute([
+                ':registration_id' => $registrationId,
+                ':tournament_id' => $tournamentId,
+            ]);
+            if ($registration->fetchColumn() === false) {
+                $pdo->commit();
+                return false;
+            }
+
+            $history = $pdo->prepare(
+                'SELECT
+                    EXISTS(SELECT 1 FROM match_player_attendance WHERE tournament_player_id = :attendance_id)
+                    OR EXISTS(SELECT 1 FROM match_goals WHERE tournament_player_id = :goal_id)
+                    OR EXISTS(SELECT 1 FROM match_disciplinary_events WHERE tournament_player_id = :discipline_id)',
+            );
+            $history->execute([
+                ':attendance_id' => $registrationId,
+                ':goal_id' => $registrationId,
+                ':discipline_id' => $registrationId,
+            ]);
+            if ((bool) $history->fetchColumn()) {
+                throw new \DomainException(
+                    'No se puede quitar al jugador porque tiene asistencia, goles o eventos disciplinarios registrados.',
+                );
+            }
+
+            $delete = $pdo->prepare(
+                'DELETE FROM tournament_players
+                 WHERE id = :registration_id AND tournament_id = :tournament_id',
+            );
+            $delete->execute([
+                ':registration_id' => $registrationId,
+                ':tournament_id' => $tournamentId,
+            ]);
+
+            $pdo->commit();
+            return $delete->rowCount() === 1;
+        } catch (\PDOException $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            if (
+                (string) $exception->getCode() === '23000'
+                || in_array((int) ($exception->errorInfo[1] ?? 0), [19, 1451], true)
+            ) {
+                throw new \DomainException(
+                    'No se puede quitar al jugador porque ya tiene registros asociados a partidos.',
+                    0,
+                    $exception,
+                );
+            }
+            throw $exception;
         } catch (\Throwable $exception) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -491,27 +715,4 @@ class TournamentRepository
         return $stmt->fetchAll();
     }
 
-    private function assertPlayerRegistrationOpen(PDO $pdo, int $tournamentId): void
-    {
-        $tournamentSql = 'SELECT CASE
-                WHEN player_registration_start_at IS NOT NULL
-                 AND player_registration_end_at IS NOT NULL
-                 AND player_registration_start_at <= CURRENT_TIMESTAMP
-                 AND player_registration_end_at >= CURRENT_TIMESTAMP
-                THEN 1 ELSE 0
-            END AS registration_open
-            FROM tournaments WHERE id = :id';
-        if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
-            $tournamentSql .= ' FOR UPDATE';
-        }
-        $tournamentQuery = $pdo->prepare($tournamentSql);
-        $tournamentQuery->execute([':id' => $tournamentId]);
-        $tournament = $tournamentQuery->fetch();
-        if ($tournament === false) {
-            throw new \DomainException('Torneo no encontrado.');
-        }
-        if (!(bool) $tournament['registration_open']) {
-            throw new \DomainException('La inscripción de jugadores está cerrada fuera de su periodo configurado.');
-        }
-    }
 }

@@ -8,7 +8,7 @@ class CorsMiddleware
 {
     public static function handle(callable $next): mixed
     {
-        $allowedOrigins = explode(',', (string) config('ALLOWED_ORIGINS', 'http://localhost:3000'));
+        $allowedOrigins = array_map('trim', explode(',', (string) config('ALLOWED_ORIGINS', 'http://localhost:3000')));
         $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
         if (in_array($origin, $allowedOrigins, true)) {

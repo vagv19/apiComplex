@@ -52,6 +52,8 @@ class ApiTest extends TestCase
         $pdo->exec('DELETE FROM teams');
         $pdo->exec('DELETE FROM categories');
         $pdo->exec('DELETE FROM expulsion_reasons');
+        $pdo->exec('DELETE FROM admin_audit_log');
+        $pdo->exec('DELETE FROM user_modules');
         $pdo->exec('DELETE FROM users');
 
         $pdo->exec("INSERT INTO categories (id, name, description, is_active) VALUES (1, 'Senior', 'Senior category', 1)");
@@ -63,6 +65,7 @@ class ApiTest extends TestCase
         $pdo->exec("INSERT INTO players (id, first_name, last_name, is_active) VALUES (2, 'Player', 'Two', 1)");
         $pdo->exec("INSERT INTO users (id, name, email, password_hash, role, is_active) VALUES (1, 'Admin', 'admin@example.com', '\$2y\$10\$ee8N2z6dE1IiFhQ8d7Gv0eCgg3i9ezVYk0rU7w2wZq3DgG1kP4lAq', 'admin', 1)");
         $pdo->exec("INSERT INTO users (id, name, email, password_hash, role, is_active) VALUES (2, 'Director', 'director@example.com', '\$2y\$10\$ee8N2z6dE1IiFhQ8d7Gv0eCgg3i9ezVYk0rU7w2wZq3DgG1kP4lAq', 'director_tecnico', 1)");
+        $pdo->exec("INSERT INTO users (id, name, email, password_hash, role, is_active) VALUES (3, 'Superadmin', 'superadmin@example.com', '\$2y\$10\$ee8N2z6dE1IiFhQ8d7Gv0eCgg3i9ezVYk0rU7w2wZq3DgG1kP4lAq', 'superadmin', 1)");
     }
 
     public function testCatalogAndTournamentCrud(): void
@@ -101,6 +104,62 @@ class ApiTest extends TestCase
 
         $this->assertTrue($tournamentRepo->addTeamToTournament((int) $tournament['id'], (int) $createdTeam['id']));
         $this->assertCount(1, $tournamentRepo->getTeamsForTournament((int) $tournament['id']));
+    }
+
+    public function testDashboardOverviewReturnsCountsAndRecentTournaments(): void
+    {
+        $pdo = Database::getConnection();
+        $pdo->exec("INSERT INTO categories (name, description, is_active) VALUES ('Inactive', NULL, 0)");
+        $pdo->exec("INSERT INTO teams (name, is_active) VALUES ('Inactive team', 0)");
+        $pdo->exec("INSERT INTO players (first_name, last_name, is_active) VALUES ('Inactive', 'Player', 0)");
+
+        $tournamentRepository = new TournamentRepository();
+        $tournaments = [];
+        for ($index = 1; $index <= 6; $index++) {
+            $tournaments[] = $tournamentRepository->create([
+                'name' => 'Dashboard tournament ' . $index,
+                'category_id' => 1,
+                'format' => 'LEAGUE',
+                'status' => 'REGISTRATION',
+            ]);
+        }
+
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = function (array $headers) use ($router): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request('GET', '/api/v1/dashboard', [], $headers, []));
+                return [http_response_code(), json_decode((string) ob_get_clean(), true)];
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [$exception->statusCode, ['message' => $exception->getMessage()]];
+            }
+        };
+
+        [$status, $response] = $dispatch($this->authHeaders());
+        self::assertSame(200, $status);
+        self::assertSame([
+            'tournaments' => 6,
+            'categories' => 1,
+            'teams' => 4,
+            'players' => 2,
+        ], $response['data']['counts']);
+        self::assertCount(5, $response['data']['recent_tournaments']);
+        self::assertSame(
+            (int) $tournaments[5]['id'],
+            (int) $response['data']['recent_tournaments'][0]['id'],
+        );
+        self::assertSame('Senior', $response['data']['recent_tournaments'][0]['category_name']);
+
+        self::assertSame(403, $dispatch($this->authHeaders(2))[0]);
+        self::assertSame(401, $dispatch([])[0]);
+
+        $module = $pdo->query("SELECT id FROM system_modules WHERE code = 'dashboard'")->fetchColumn();
+        $assignment = $pdo->prepare(
+            'INSERT INTO user_modules (user_id, module_id, is_enabled) VALUES (1, :module_id, 0)',
+        );
+        $assignment->execute([':module_id' => (int) $module]);
+        self::assertSame(403, $dispatch($this->authHeaders())[0]);
     }
 
     public function testPlayerPhotoUploadRequiresAdminAndValidImage(): void
@@ -287,6 +346,33 @@ class ApiTest extends TestCase
         $this->assertSame('Categoría no encontrada.', $unknownCategoryResponse['message']);
     }
 
+    public function testNewTournamentsDefaultRegistrationWindowToTwentyDays(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Default Registration Window',
+            'category_id' => 1,
+        ]);
+
+        $start = \DateTimeImmutable::createFromFormat(
+            '!Y-m-d H:i:s',
+            (string) $tournament['player_registration_start_at'],
+        );
+        $end = \DateTimeImmutable::createFromFormat(
+            '!Y-m-d H:i:s',
+            (string) $tournament['player_registration_end_at'],
+        );
+
+        $this->assertNotFalse($start);
+        $this->assertNotFalse($end);
+        $this->assertLessThanOrEqual(time(), $start->getTimestamp());
+        $this->assertGreaterThanOrEqual(time() - 10, $start->getTimestamp());
+        $this->assertSame(
+            $start->modify('+20 days')->format('Y-m-d H:i:s'),
+            $end->format('Y-m-d H:i:s'),
+        );
+    }
+
     public function testPlayerTournamentRegistrationUsesItsConfiguredTimeWindow(): void
     {
         $tournamentRepo = new TournamentRepository();
@@ -315,7 +401,7 @@ class ApiTest extends TestCase
         $tournamentRepo->update((int) $tournament['id'], [
             'name' => $tournament['name'],
             'status' => 'COMPLETED',
-            'allow_player_registration' => false,
+            'allow_player_registration' => true,
         ]);
         $this->assertTrue($tournamentRepo->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], (int) $player['id']));
         $this->assertFalse($tournamentRepo->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], (int) $player['id']));
@@ -331,7 +417,7 @@ class ApiTest extends TestCase
         $tournamentRepo->addPlayerToTournament((int) $tournament['id'], (int) $secondTeam['id'], 2);
     }
 
-    public function testPlayerRegistrationRequiresBothWindowDatesAndRejectsFutureWindow(): void
+    public function testPlayerRegistrationAllowsUnconfiguredWindowAndRejectsFutureWindow(): void
     {
         $repository = new TournamentRepository();
         $tournament = $repository->create([
@@ -339,16 +425,13 @@ class ApiTest extends TestCase
             'category_id' => 1,
             'format' => 'LEAGUE',
             'status' => 'REGISTRATION',
+            'player_registration_start_at' => null,
+            'player_registration_end_at' => null,
         ]);
         $team = (new TeamRepository())->create(['name' => 'Window Team']);
         $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
 
-        try {
-            $repository->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], 1);
-            self::fail('A registration without a complete time window must be closed.');
-        } catch (\DomainException $exception) {
-            $this->assertStringContainsString('periodo configurado', $exception->getMessage());
-        }
+        $this->assertTrue($repository->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], 1));
 
         $repository->update((int) $tournament['id'], [
             'name' => $tournament['name'],
@@ -376,6 +459,19 @@ class ApiTest extends TestCase
         $this->assertSame($validBody['player_registration_start_at'], $response['data']['player_registration_start_at']);
         $this->assertSame($validBody['player_registration_end_at'], $response['data']['player_registration_end_at']);
         $this->assertSame(0, (int) $response['data']['player_registration_open']);
+
+        ob_start();
+        $controller->update(
+            new Request('POST', '/api/v1/tournaments/' . $response['data']['id'], [], [], [
+                'name' => $validBody['name'],
+                'player_registration_end_at' => '2099-12-30 23:59:59',
+            ]),
+            ['id' => (string) $response['data']['id']]
+        );
+        $updatedWindowResponse = json_decode((string) ob_get_clean(), true);
+        $this->assertSame(200, http_response_code());
+        $this->assertSame($validBody['player_registration_start_at'], $updatedWindowResponse['data']['player_registration_start_at']);
+        $this->assertSame('2099-12-30 23:59:59', $updatedWindowResponse['data']['player_registration_end_at']);
 
         ob_start();
         $controller->update(
@@ -425,6 +521,81 @@ class ApiTest extends TestCase
         $this->expectException(\DomainException::class);
         $this->expectExceptionMessage('El número de camiseta ya está asignado');
         $repository->addPlayerToTournament((int) $tournament['id'], (int) $team['id'], 2, 10);
+    }
+
+    public function testBatchPlayerRegistrationIsAtomic(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Batch Registration League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Batch Registration FC']);
+        $extraPlayer = (new PlayerRepository())->create([
+            'first_name' => 'Player',
+            'last_name' => 'Three',
+        ]);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+
+        self::assertSame(
+            2,
+            $repository->addPlayersToTournament(
+                (int) $tournament['id'],
+                (int) $team['id'],
+                [1, 2],
+            ),
+        );
+        self::assertCount(2, $repository->getPlayersForTournament((int) $tournament['id']));
+
+        try {
+            $repository->addPlayersToTournament(
+                (int) $tournament['id'],
+                (int) $team['id'],
+                [(int) $extraPlayer['id'], 2],
+            );
+            self::fail('A duplicate player must roll back the entire batch.');
+        } catch (\DomainException $exception) {
+            self::assertStringContainsString('ya están inscritos', $exception->getMessage());
+        }
+
+        self::assertCount(2, $repository->getPlayersForTournament((int) $tournament['id']));
+    }
+
+    public function testBatchPlayerRegistrationEndpointReturnsUpdatedRoster(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Batch Endpoint League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Batch Endpoint FC']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+
+        ob_start();
+        $router->dispatch(new Request(
+            'POST',
+            '/api/v1/tournaments/' . $tournament['id'] . '/players/batch',
+            [],
+            $this->authHeaders(),
+            [
+                'team_id' => (int) $team['id'],
+                'player_ids' => [1, 2],
+            ],
+        ));
+        $response = json_decode((string) ob_get_clean(), true);
+
+        self::assertSame(201, http_response_code());
+        self::assertSame('2 jugador(es) registrado(s) correctamente.', $response['message']);
+        self::assertCount(2, $response['data']);
     }
 
     public function testPlayerTournamentRegistrationRejectsInvalidJerseyNumber(): void
@@ -497,11 +668,38 @@ class ApiTest extends TestCase
         $this->assertSame('Director Team', $teamResponse['data']['team']['name']);
         $this->assertSame([], $teamResponse['data']['players']);
 
+        foreach ([
+            [
+                'first_name' => 'Missing Maternal',
+                'paternal_surname' => 'Surname',
+                'missing_field' => 'maternal_surname',
+            ],
+            [
+                'first_name' => 'Missing Paternal',
+                'maternal_surname' => 'Surname',
+                'missing_field' => 'paternal_surname',
+            ],
+        ] as $invalidPlayer) {
+            ob_start();
+            $controller->registerPlayerForDirector(
+                new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/my-team/players', [], $headers, [
+                    'first_name' => $invalidPlayer['first_name'],
+                    'paternal_surname' => $invalidPlayer['paternal_surname'] ?? null,
+                    'maternal_surname' => $invalidPlayer['maternal_surname'] ?? null,
+                ]),
+                ['id' => (string) $tournament['id']]
+            );
+            $invalidPlayerResponse = json_decode((string) ob_get_clean(), true);
+            $this->assertSame(422, http_response_code());
+            $this->assertArrayHasKey($invalidPlayer['missing_field'], $invalidPlayerResponse['errors']);
+        }
+
         ob_start();
         $controller->registerPlayerForDirector(
             new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/my-team/players', [], $headers, [
                 'first_name' => 'Assigned',
-                'last_name' => 'Player',
+                'paternal_surname' => 'Paternal',
+                'maternal_surname' => 'Maternal',
                 'birth_date' => '2000-01-02',
                 'jersey_number' => 8,
                 'team_id' => 999,
@@ -515,13 +713,14 @@ class ApiTest extends TestCase
         $this->assertCount(1, $playerResponse['data']['players']);
         $this->assertSame(8, (int) $playerResponse['data']['players'][0]['jersey_number']);
         $this->assertSame((int) $team['id'], (int) $playerResponse['data']['players'][0]['team_id']);
-        $this->assertSame(1, (int) Database::getConnection()->query("SELECT COUNT(*) FROM players WHERE first_name = 'Assigned' AND last_name = 'Player'")->fetchColumn());
+        $this->assertSame(1, (int) Database::getConnection()->query("SELECT COUNT(*) FROM players WHERE first_name = 'Assigned' AND last_name = 'Paternal Maternal'")->fetchColumn());
 
         ob_start();
         $controller->registerPlayerForDirector(
             new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/my-team/players', [], $headers, [
                 'first_name' => 'Duplicate',
-                'last_name' => 'Dorsal',
+                'paternal_surname' => 'Dorsal',
+                'maternal_surname' => 'Duplicate',
                 'jersey_number' => 8,
             ]),
             ['id' => (string) $tournament['id']]
@@ -612,7 +811,8 @@ class ApiTest extends TestCase
                 [
                     'team_id' => (int) $team['id'],
                     'first_name' => 'Admin',
-                    'last_name' => 'Added',
+                    'paternal_surname' => 'Paternal',
+                    'maternal_surname' => 'Added',
                     'jersey_number' => 3,
                 ]
             ),
@@ -622,6 +822,73 @@ class ApiTest extends TestCase
         $this->assertSame(201, http_response_code());
         $this->assertSame((int) $team['id'], (int) $createResponse['data']['team']['team_id']);
         $this->assertCount(1, $createResponse['data']['players']);
+    }
+
+    public function testDeletingTournamentPlayerKeepsCatalogueAndProtectsMatchHistory(): void
+    {
+        [$tournament, $matchId, $homeRegistrationId, $awayRegistrationId] = $this->createMatchReportFixture('Roster removal');
+        $pdo = Database::getConnection();
+        $playerQuery = $pdo->prepare('SELECT player_id FROM tournament_players WHERE id = :registration_id');
+        $playerQuery->execute([':registration_id' => $homeRegistrationId]);
+        $homePlayerId = (int) $playerQuery->fetchColumn();
+
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = function (string $method, string $path, array $headers) use ($router): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request($method, $path, [], $headers, []));
+                $response = json_decode((string) ob_get_clean(), true);
+                return [http_response_code(), $response];
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [$exception->statusCode, ['message' => $exception->getMessage()]];
+            }
+        };
+        $path = '/api/v1/tournaments/' . $tournament['id'] . '/players/';
+
+        [$invalidStatus] = $dispatch('DELETE', $path . 'invalid', $this->authHeaders());
+        $this->assertSame(422, $invalidStatus);
+        [$unauthenticatedStatus] = $dispatch('DELETE', $path . $homeRegistrationId, []);
+        $this->assertSame(401, $unauthenticatedStatus);
+        [$forbiddenStatus] = $dispatch('DELETE', $path . $homeRegistrationId, $this->authHeaders(2));
+        $this->assertSame(403, $forbiddenStatus);
+        [$missingStatus] = $dispatch('DELETE', $path . '999999', $this->authHeaders());
+        $this->assertSame(404, $missingStatus);
+
+        [$deletedStatus, $deletedResponse] = $dispatch(
+            'DELETE',
+            $path . $homeRegistrationId,
+            $this->authHeaders(),
+        );
+        $this->assertSame(200, $deletedStatus);
+        $this->assertTrue($deletedResponse['success']);
+        $this->assertSame($homeRegistrationId, $deletedResponse['data']['registration_id']);
+        $this->assertSame(0, (int) $pdo->query(
+            'SELECT COUNT(*) FROM tournament_players WHERE id = ' . $homeRegistrationId,
+        )->fetchColumn());
+        $catalogPlayerCount = $pdo->prepare('SELECT COUNT(*) FROM players WHERE id = :id');
+        $catalogPlayerCount->execute([':id' => $homePlayerId]);
+        $this->assertSame(1, (int) $catalogPlayerCount->fetchColumn());
+
+        $attendance = $pdo->prepare(
+            'INSERT INTO match_player_attendance (match_id, tournament_player_id, attendance_status)
+             VALUES (:match_id, :registration_id, :attendance_status)',
+        );
+        $attendance->execute([
+            ':match_id' => $matchId,
+            ':registration_id' => $awayRegistrationId,
+            ':attendance_status' => 'PRESENT',
+        ]);
+        [$conflictStatus, $conflictResponse] = $dispatch(
+            'DELETE',
+            $path . $awayRegistrationId,
+            $this->authHeaders(),
+        );
+        $this->assertSame(409, $conflictStatus);
+        $this->assertFalse($conflictResponse['success']);
+        $this->assertSame(1, (int) $pdo->query(
+            'SELECT COUNT(*) FROM tournament_players WHERE id = ' . $awayRegistrationId,
+        )->fetchColumn());
     }
 
     public function testDirectorCannotLoadTeamFromAnotherTournament(): void
@@ -709,7 +976,13 @@ class ApiTest extends TestCase
 
         $match = Database::getConnection()->query("SELECT id, home_tournament_team_id, away_tournament_team_id FROM matches WHERE is_bye = 0 ORDER BY id LIMIT 1")->fetch();
         ob_start();
-        (new MatchController())->result(new Request('POST', '/api/v1/matches/' . $match['id'] . '/result', [], [], ['home_score' => 3, 'away_score' => 1]), ['id' => $match['id']]);
+        (new MatchController())->result(new Request(
+            'POST',
+            '/api/v1/matches/' . $match['id'] . '/result',
+            [],
+            $this->authHeaders(),
+            ['home_score' => 3, 'away_score' => 1],
+        ), ['id' => $match['id']]);
         $response = json_decode((string) ob_get_clean(), true);
         $this->assertTrue($response['success']);
 
@@ -756,7 +1029,7 @@ class ApiTest extends TestCase
             'POST',
             '/api/v1/tournaments/' . $tournament['id'] . '/league/qualification/generate',
             [],
-            [],
+            $this->authHeaders(),
             [],
         ));
         $pendingResponse = json_decode((string) ob_get_clean(), true);
@@ -770,7 +1043,7 @@ class ApiTest extends TestCase
                 'POST',
                 '/api/v1/matches/' . $matches[1]['id'] . '/result',
                 [],
-                [],
+                $this->authHeaders(),
                 ['home_score' => 1, 'away_score' => 0, 'reason' => 'Último resultado regular'],
             ),
             ['id' => $matches[1]['id']],
@@ -787,7 +1060,7 @@ class ApiTest extends TestCase
             'POST',
             '/api/v1/tournaments/' . $tournament['id'] . '/league/qualification/generate',
             [],
-            [],
+            $this->authHeaders(),
             [],
         ));
         $startedResponse = json_decode((string) ob_get_clean(), true);
@@ -807,7 +1080,7 @@ class ApiTest extends TestCase
             'POST',
             '/api/v1/tournaments/' . $tournament['id'] . '/league/qualification/generate',
             [],
-            [],
+            $this->authHeaders(),
             [],
         ));
         $duplicateResponse = json_decode((string) ob_get_clean(), true);
@@ -1055,7 +1328,7 @@ class ApiTest extends TestCase
             'POST',
             '/api/v1/tournaments/' . $tournament['id'] . '/groups/generate',
             [],
-            [],
+            $this->authHeaders(),
             ['group_count' => 0],
         ));
         $invalidResponse = json_decode((string) ob_get_clean(), true);
@@ -1067,7 +1340,7 @@ class ApiTest extends TestCase
             'POST',
             '/api/v1/tournaments/' . $tournament['id'] . '/groups/generate',
             [],
-            [],
+            $this->authHeaders(),
             ['group_count' => 2],
         ));
         $createdResponse = json_decode((string) ob_get_clean(), true);
@@ -1078,10 +1351,10 @@ class ApiTest extends TestCase
 
         ob_start();
         $router->dispatch(new Request(
-            'DELETE',
-            '/api/v1/tournaments/' . $tournament['id'] . '/groups',
+            'POST',
+            '/api/v1/tournaments/' . $tournament['id'] . '/groups/cancel',
             [],
-            [],
+            $this->authHeaders(),
             [],
         ));
         $cancelledResponse = json_decode((string) ob_get_clean(), true);
@@ -1123,10 +1396,10 @@ class ApiTest extends TestCase
         $router = $routerFactory();
         ob_start();
         $router->dispatch(new Request(
-            'DELETE',
-            '/api/v1/tournaments/' . $tournament['id'] . '/groups',
+            'POST',
+            '/api/v1/tournaments/' . $tournament['id'] . '/groups/cancel',
             [],
-            [],
+            $this->authHeaders(),
             [],
         ));
         $conflictResponse = json_decode((string) ob_get_clean(), true);
@@ -2322,6 +2595,203 @@ class ApiTest extends TestCase
         }
     }
 
+    public function testSuperadminCanOverrideRegistrationAndAuditTheReason(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Closed registration',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'allow_player_registration' => false,
+            'player_registration_start_at' => '2099-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Override team']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = static function (array $headers, array $body) use ($router): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request(
+                    'POST',
+                    '/api/v1/players/registration-override',
+                    [],
+                    $headers,
+                    $body,
+                ));
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [['success' => false], $exception->statusCode];
+            }
+            $response = json_decode((string) ob_get_clean(), true);
+            return [$response, http_response_code()];
+        };
+        $body = [
+            'tournament_id' => (int) $tournament['id'],
+            'team_id' => (int) $team['id'],
+            'player_id' => 1,
+        ];
+
+        [$forbidden, $forbiddenStatus] = $dispatch($this->authHeaders(), [...$body, 'reason' => 'approved']);
+        $this->assertFalse($forbidden['success']);
+        $this->assertSame(403, $forbiddenStatus);
+        $this->assertSame(0, (int) Database::getConnection()->query('SELECT COUNT(*) FROM admin_audit_log')->fetchColumn());
+
+        [$invalid, $invalidStatus] = $dispatch($this->authHeaders(3), $body);
+        $this->assertFalse($invalid['success']);
+        $this->assertSame(422, $invalidStatus);
+
+        [$created, $createdStatus] = $dispatch(
+            $this->authHeaders(3),
+            [...$body, 'jersey_number' => 10, 'reason' => 'Approved by committee'],
+        );
+        $this->assertTrue($created['success']);
+        $this->assertSame(201, $createdStatus);
+        $this->assertSame(1, (int) Database::getConnection()->query('SELECT COUNT(*) FROM tournament_players')->fetchColumn());
+
+        $audit = Database::getConnection()->query('SELECT actor_user_id, actor_role, action, reason FROM admin_audit_log')->fetch();
+        $this->assertSame(3, (int) $audit['actor_user_id']);
+        $this->assertSame('superadmin', $audit['actor_role']);
+        $this->assertSame('players.registration.override', $audit['action']);
+        $this->assertSame('Approved by committee', $audit['reason']);
+
+        [$duplicate, $duplicateStatus] = $dispatch(
+            $this->authHeaders(3),
+            [...$body, 'jersey_number' => 10, 'reason' => 'Duplicate attempt'],
+        );
+        $this->assertFalse($duplicate['success']);
+        $this->assertSame(409, $duplicateStatus);
+
+        $unregisteredTeam = (new TeamRepository())->create(['name' => 'Not enrolled']);
+        [$invalidTeam, $invalidTeamStatus] = $dispatch(
+            $this->authHeaders(3),
+            [
+                ...$body,
+                'team_id' => (int) $unregisteredTeam['id'],
+                'player_id' => 2,
+                'reason' => 'Must not bypass tournament membership',
+            ],
+        );
+        $this->assertFalse($invalidTeam['success']);
+        $this->assertSame(409, $invalidTeamStatus);
+        $this->assertSame(1, (int) Database::getConnection()->query('SELECT COUNT(*) FROM admin_audit_log')->fetchColumn());
+
+        $readAudit = function (array $headers) use ($router): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request('GET', '/api/v1/audit', [], $headers, []));
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [['success' => false], $exception->statusCode];
+            }
+            return [json_decode((string) ob_get_clean(), true), http_response_code()];
+        };
+        [$adminAudit, $adminAuditStatus] = $readAudit($this->authHeaders());
+        $this->assertFalse($adminAudit['success']);
+        $this->assertSame(403, $adminAuditStatus);
+        [$superadminAudit, $superadminAuditStatus] = $readAudit($this->authHeaders(3));
+        $this->assertTrue($superadminAudit['success']);
+        $this->assertSame(200, $superadminAuditStatus);
+        $this->assertSame(1, $superadminAudit['data']['total']);
+    }
+
+    public function testSuperadminRegistrationEndpointBypassesWindowAndAuditsTheActor(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Expired registration',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'allow_player_registration' => false,
+            'player_registration_start_at' => '2099-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $team = (new TeamRepository())->create(['name' => 'Window override team']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $team['id']);
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = function (int $userId, array $body) use ($router, $tournament): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request(
+                    'POST',
+                    '/api/v1/tournaments/' . $tournament['id'] . '/players',
+                    [],
+                    $this->authHeaders($userId),
+                    $body,
+                ));
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [['success' => false], $exception->statusCode];
+            }
+            return [json_decode((string) ob_get_clean(), true), http_response_code()];
+        };
+        $body = [
+            'team_id' => (int) $team['id'],
+            'player_id' => 1,
+            'role' => 'superadmin',
+        ];
+
+        [$adminResponse, $adminStatus] = $dispatch(1, $body);
+        $this->assertFalse($adminResponse['success']);
+        $this->assertSame(409, $adminStatus);
+        $this->assertSame(0, (int) Database::getConnection()->query('SELECT COUNT(*) FROM tournament_players')->fetchColumn());
+        $this->assertSame(0, (int) Database::getConnection()->query('SELECT COUNT(*) FROM admin_audit_log')->fetchColumn());
+
+        [$created, $createdStatus] = $dispatch(3, $body);
+        $this->assertTrue($created['success']);
+        $this->assertSame(201, $createdStatus);
+        $this->assertSame(1, (int) Database::getConnection()->query('SELECT COUNT(*) FROM tournament_players')->fetchColumn());
+        $audit = Database::getConnection()->query('SELECT actor_user_id, actor_role, action, reason FROM admin_audit_log')->fetch();
+        $this->assertSame(3, (int) $audit['actor_user_id']);
+        $this->assertSame('superadmin', $audit['actor_role']);
+        $this->assertSame('players.registration.override', $audit['action']);
+        $this->assertStringContainsString('superadmin', $audit['reason']);
+
+        [$duplicate, $duplicateStatus] = $dispatch(3, $body);
+        $this->assertTrue($duplicate['success']);
+        $this->assertSame(200, $duplicateStatus);
+        $this->assertSame(1, (int) Database::getConnection()->query('SELECT COUNT(*) FROM tournament_players')->fetchColumn());
+        $this->assertSame(1, (int) Database::getConnection()->query('SELECT COUNT(*) FROM admin_audit_log')->fetchColumn());
+    }
+
+    public function testAuthorizationRejectsChangedRoleInactiveAndInvalidatedAccounts(): void
+    {
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $request = fn () => new Request('GET', '/api/v1/categories', [], $this->authHeaders(), []);
+
+        Database::getConnection()->exec("UPDATE users SET role = 'superadmin' WHERE id = 1");
+        try {
+            $router->dispatch($request());
+            self::fail('A token with a stale role must be rejected.');
+        } catch (HttpException $exception) {
+            $this->assertSame(403, $exception->statusCode);
+        }
+
+        Database::getConnection()->exec('UPDATE users SET is_active = 0, auth_version = auth_version + 1 WHERE id = 1');
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '1',
+            'role' => 'superadmin',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+        try {
+            $router->dispatch(new Request('GET', '/api/v1/categories', [], $headers, []));
+            self::fail('An inactive account must be rejected.');
+        } catch (HttpException $exception) {
+            $this->assertSame(401, $exception->statusCode);
+        }
+
+        Database::getConnection()->exec("UPDATE users SET is_active = 1, auth_version = auth_version + 1 WHERE id = 1");
+        try {
+            $router->dispatch(new Request('GET', '/api/v1/categories', [], $headers, []));
+            self::fail('A token with a stale authorization version must be rejected.');
+        } catch (HttpException $exception) {
+            $this->assertSame(401, $exception->statusCode);
+        }
+    }
+
     public function testFormerPutAndPatchEndpointsAreHandledThroughPostRoutes(): void
     {
         [$tournament, $matchId] = $this->createMatchReportFixture('POST update methods');
@@ -2387,6 +2857,243 @@ class ApiTest extends TestCase
             ['description' => 'Should not be accepted'],
         );
         $this->assertSame(405, $legacyReasonStatus);
+
+        [, $legacyDeleteStatus] = $dispatch(
+            'DELETE',
+            '/api/v1/expulsion-reasons/' . $reason['id'],
+            [],
+        );
+        $this->assertSame(405, $legacyDeleteStatus);
+    }
+
+    public function testUserAccessCrudEnforcesRoleScopeAndSoftDeleteSafety(): void
+    {
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = function (string $method, string $path, array $body, int $userId = 3) use ($router): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request($method, $path, [], $this->authHeaders($userId), $body));
+                $json = json_decode((string) ob_get_clean(), true);
+                return [http_response_code(), $json];
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [$exception->statusCode, ['message' => $exception->getMessage()]];
+            }
+        };
+
+        [$createdStatus, $created] = $dispatch('POST', '/api/v1/users/create', [
+            'name' => 'New Director',
+            'email' => 'new-director@example.com',
+            'password' => 'A-secure-password-2026',
+            'confirm_password' => 'A-secure-password-2026',
+            'role' => 'director_tecnico',
+            'is_active' => true,
+            'modules' => ['dashboard', 'teams'],
+        ]);
+        self::assertSame(201, $createdStatus);
+        self::assertSame('director_tecnico', $created['data']['role']);
+        self::assertArrayNotHasKey('password_hash', $created['data']);
+
+        [$adminCreatedStatus, $adminCreated] = $dispatch('POST', '/api/v1/users/create', [
+            'name' => 'Created Admin',
+            'email' => 'created-admin@example.com',
+            'password' => 'A-secure-password-2026',
+            'confirm_password' => 'A-secure-password-2026',
+            'role' => 'admin',
+            'modules' => ['dashboard', 'users'],
+            'assignments' => [],
+        ], 1);
+        self::assertSame(201, $adminCreatedStatus);
+        self::assertSame('admin', $adminCreated['data']['role']);
+        self::assertArrayNotHasKey('password_hash', $adminCreated['data']);
+        self::assertSame([], (new \App\Repositories\UserAccessRepository())
+            ->teamsForUser((int) $adminCreated['data']['id']));
+
+        [$adminWithTeamStatus] = $dispatch('POST', '/api/v1/users/create', [
+            'name' => 'Admin With Team',
+            'email' => 'admin-with-team@example.com',
+            'password' => 'A-secure-password-2026',
+            'confirm_password' => 'A-secure-password-2026',
+            'role' => 'admin',
+            'modules' => ['dashboard'],
+            'assignments' => [['tournament_id' => 1, 'tournament_team_id' => 1]],
+        ], 1);
+        self::assertSame(422, $adminWithTeamStatus);
+        self::assertNull((new \App\Repositories\UserAccessRepository())
+            ->findByEmail('admin-with-team@example.com'));
+
+        [$listStatus, $listed] = $dispatch('GET', '/api/v1/users', [], 1);
+        self::assertSame(200, $listStatus);
+        self::assertSame(2, (int) $listed['data']['summary']['directors']);
+        self::assertSame(2, (int) $listed['data']['summary']['admins']);
+        $visibleUserIds = array_map(
+            static fn (array $user): int => (int) $user['id'],
+            $listed['data']['items'],
+        );
+        self::assertContains(1, $visibleUserIds);
+        self::assertContains((int) $adminCreated['data']['id'], $visibleUserIds);
+        self::assertNotContains(3, $visibleUserIds);
+
+        [$forbiddenStatus] = $dispatch('POST', '/api/v1/users/create', [
+            'name' => 'Escalated',
+            'email' => 'escalated@example.com',
+            'password' => 'A-secure-password-2026',
+            'confirm_password' => 'A-secure-password-2026',
+            'role' => 'superadmin',
+        ], 1);
+        self::assertSame(403, $forbiddenStatus);
+
+        [$directorListStatus] = $dispatch('GET', '/api/v1/users', [], 2);
+        self::assertSame(403, $directorListStatus);
+
+        [$lastSuperadminStatus] = $dispatch('POST', '/api/v1/users/soft-delete', [
+            'user_id' => 3,
+            'reason' => 'Prueba de último superadmin',
+        ]);
+        self::assertSame(409, $lastSuperadminStatus);
+
+        [$moduleStatus] = $dispatch('POST', '/api/v1/users/assign-modules', [
+            'user_id' => 1,
+            'modules' => [],
+        ]);
+        self::assertSame(200, $moduleStatus);
+        [$disabledModuleStatus] = $dispatch('GET', '/api/v1/categories', [], 1);
+        self::assertSame(403, $disabledModuleStatus);
+    }
+
+    public function testTemporaryPasswordRequiresChangeAndRevokesPreviousJwt(): void
+    {
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = static function (string $method, string $path, array $headers, array $body = []) use ($router): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request($method, $path, [], $headers, $body));
+                $json = json_decode((string) ob_get_clean(), true);
+                return [http_response_code(), $json];
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [$exception->statusCode, ['message' => $exception->getMessage()]];
+            }
+        };
+
+        [$resetStatus, $reset] = $dispatch(
+            'POST',
+            '/api/v1/users/reset-password',
+            $this->authHeaders(3),
+            ['user_id' => 1],
+        );
+        self::assertSame(200, $resetStatus);
+        self::assertSame(32, strlen($reset['data']['temporary_password']));
+        self::assertTrue($reset['data']['must_change_password']);
+        self::assertSame(401, $dispatch('GET', '/api/v1/categories', $this->authHeaders(1))[0]);
+
+        $temporaryPassword = $reset['data']['temporary_password'];
+        $passwordQuery = Database::getConnection()->prepare('SELECT password_hash FROM users WHERE id = 1');
+        $passwordQuery->execute();
+        self::assertTrue(password_verify($temporaryPassword, (string) $passwordQuery->fetchColumn()));
+        $auditQuery = Database::getConnection()->prepare(
+            "SELECT new_values FROM admin_audit_log WHERE entity_type = 'user' AND entity_id = '1' ORDER BY id DESC LIMIT 1",
+        );
+        $auditQuery->execute();
+        self::assertStringNotContainsString($temporaryPassword, (string) $auditQuery->fetchColumn());
+
+        $forcedToken = signToken([
+            'sub' => '1',
+            'role' => 'admin',
+            'ver' => 1,
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ]);
+        $forcedHeaders = ['Authorization' => 'Bearer ' . $forcedToken];
+        [$forcedStatus, $forcedResponse] = $dispatch('GET', '/api/v1/categories', $forcedHeaders);
+        self::assertSame(403, $forcedStatus);
+        self::assertStringContainsString('cambiar tu contraseña', $forcedResponse['message']);
+
+        [$changeStatus, $changed] = $dispatch('POST', '/api/v1/users/change-password', $forcedHeaders, [
+            'current_password' => $temporaryPassword,
+            'new_password' => 'Another-secure-password-2026',
+            'confirm_password' => 'Another-secure-password-2026',
+        ]);
+        self::assertSame(200, $changeStatus);
+        self::assertArrayHasKey('token', $changed['data']);
+        self::assertSame(200, $dispatch('GET', '/api/v1/categories', [
+            'Authorization' => 'Bearer ' . $changed['data']['token'],
+        ])[0]);
+    }
+
+    public function testDirectorReadsOnlyTournamentsAndTeamsAssignedToThem(): void
+    {
+        $repository = new TournamentRepository();
+        $assignedTournament = $repository->create([
+            'name' => 'Assigned tournament',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $otherTournament = $repository->create([
+            'name' => 'Other tournament',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $repository->addTeamToTournament((int) $assignedTournament['id'], 1);
+        $repository->addTeamToTournament((int) $assignedTournament['id'], 2);
+        $repository->addTeamToTournament((int) $otherTournament['id'], 3);
+        $this->assertTrue($repository->assignDirectorToTeam(
+            (int) $assignedTournament['id'],
+            1,
+            2,
+        ));
+        $repository->addPlayerToTournament((int) $assignedTournament['id'], 1, 1);
+        $repository->addPlayerToTournament((int) $assignedTournament['id'], 2, 2);
+
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = function (string $path) use ($router): array {
+            ob_start();
+            try {
+                $router->dispatch(new Request('GET', $path, [], $this->authHeaders(2), []));
+                return [http_response_code(), json_decode((string) ob_get_clean(), true)];
+            } catch (HttpException $exception) {
+                ob_end_clean();
+                return [$exception->statusCode, ['message' => $exception->getMessage()]];
+            }
+        };
+
+        [$listStatus, $list] = $dispatch('/api/v1/tournaments');
+        self::assertSame(200, $listStatus);
+        self::assertSame(1, $list['data']['total']);
+        self::assertSame((int) $assignedTournament['id'], (int) $list['data']['items'][0]['id']);
+
+        [$teamsStatus, $teams] = $dispatch('/api/v1/tournaments/' . $assignedTournament['id'] . '/teams');
+        self::assertSame(200, $teamsStatus);
+        self::assertCount(1, $teams['data']);
+        self::assertSame(1, (int) $teams['data'][0]['team_id']);
+
+        [$playersStatus, $players] = $dispatch('/api/v1/tournaments/' . $assignedTournament['id'] . '/players');
+        self::assertSame(200, $playersStatus);
+        self::assertCount(1, $players['data']);
+        self::assertSame(1, (int) $players['data'][0]['player_id']);
+
+        [$otherStatus] = $dispatch('/api/v1/tournaments/' . $otherTournament['id']);
+        self::assertSame(403, $otherStatus);
+    }
+
+    private function authHeaders(int $userId = 1, ?string $role = null): array
+    {
+        $role ??= match ($userId) {
+            1 => 'admin',
+            2 => 'director_tecnico',
+            3 => 'superadmin',
+            default => '',
+        };
+        return ['Authorization' => 'Bearer ' . signToken([
+            'sub' => (string) $userId,
+            'role' => $role,
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
     }
 
     private function createMatchReportFixture(string $prefix = 'Match report'): array

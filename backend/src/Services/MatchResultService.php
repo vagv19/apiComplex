@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Config\Database;
+use App\Repositories\AdminAuditRepository;
 
 class MatchResultService
 {
@@ -16,6 +17,8 @@ class MatchResultService
         string $reason,
         ?int $homePenalties = null,
         ?int $awayPenalties = null,
+        ?string $changedByRole = null,
+        ?string $ipAddress = null,
     ): array
     {
         $pdo = Database::getConnection();
@@ -30,6 +33,8 @@ class MatchResultService
                 $reason,
                 $homePenalties,
                 $awayPenalties,
+                $changedByRole,
+                $ipAddress,
             );
             $pdo->commit();
             return $result;
@@ -50,6 +55,8 @@ class MatchResultService
         string $reason,
         ?int $homePenalties = null,
         ?int $awayPenalties = null,
+        ?string $changedByRole = null,
+        ?string $ipAddress = null,
     ): array {
         if (!$pdo->inTransaction()) {
             throw new \LogicException('El resultado requiere una transacción activa.');
@@ -114,6 +121,30 @@ class MatchResultService
             ':changed_by' => $changedBy,
             ':reason' => $reason,
         ]);
+        if ($changedBy !== null && $changedByRole !== null) {
+            (new AdminAuditRepository())->record($pdo, [
+                'actor_user_id' => $changedBy,
+                'actor_role' => $changedByRole,
+                'action' => 'matches.result.record',
+                'entity_type' => 'match',
+                'entity_id' => $matchId,
+                'tournament_id' => (int) $match['tournament_id'],
+                'reason' => $reason,
+                'old_values' => [
+                    'home_score' => $match['home_score'],
+                    'away_score' => $match['away_score'],
+                    'home_penalties' => $match['home_penalties'],
+                    'away_penalties' => $match['away_penalties'],
+                ],
+                'new_values' => [
+                    'home_score' => $homeScore,
+                    'away_score' => $awayScore,
+                    'home_penalties' => $homePenalties,
+                    'away_penalties' => $awayPenalties,
+                ],
+                'ip_address' => $ipAddress,
+            ]);
+        }
 
         $roundId = (int) $match['round_id'];
         $roundState = $pdo->prepare('SELECT COUNT(*) AS total, SUM(status IN (:completed, :bye)) AS completed FROM matches WHERE round_id = :round_id');

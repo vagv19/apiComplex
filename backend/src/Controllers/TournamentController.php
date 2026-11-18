@@ -8,19 +8,30 @@ use App\Core\Request;
 use App\Core\Response;
 use App\Core\Validator;
 use App\Middleware\AuthMiddleware;
+use App\Middleware\AuthorizationService;
 use App\Repositories\TournamentRepository;
+use App\Services\PlayerRegistrationService;
 
 class TournamentController
 {
-    public function __construct(private readonly TournamentRepository $repository = new TournamentRepository())
-    {
+    private readonly PlayerRegistrationService $registrationService;
+
+    public function __construct(
+        private readonly TournamentRepository $repository = new TournamentRepository(),
+        ?PlayerRegistrationService $registrationService = null,
+    ) {
+        $this->registrationService = $registrationService ?? new PlayerRegistrationService($repository);
     }
 
     public function list(Request $request, array $params): void
     {
         $page = max(1, (int) ($request->query['page'] ?? 1));
         $limit = min(100, max(1, (int) ($request->query['limit'] ?? 15)));
-        Response::json(200, true, $this->repository->list($page, $limit), 'Listado de torneos.');
+        $user = AuthMiddleware::requireAuth($request->headers);
+        $data = ($user['role'] ?? '') === 'director_tecnico'
+            ? $this->repository->listForDirector((int) $user['sub'], $page, $limit)
+            : $this->repository->list($page, $limit);
+        Response::json(200, true, $data, 'Listado de torneos.');
     }
 
     public function create(Request $request, array $params): void
@@ -192,7 +203,13 @@ class TournamentController
 
     public function teams(Request $request, array $params): void
     {
-        $rows = $this->repository->getTeamsForTournament((int) $params['id']);
+        $user = AuthMiddleware::requireAuth($request->headers);
+        $rows = ($user['role'] ?? '') === 'director_tecnico'
+            ? array_values(array_filter(
+                [$this->repository->getTeamForDirector((int) $params['id'], (int) $user['sub'])],
+                static fn (?array $team): bool => $team !== null,
+            ))
+            : $this->repository->getTeamsForTournament((int) $params['id']);
         Response::json(200, true, $rows, 'Equipos inscritos.');
     }
 
@@ -226,7 +243,8 @@ class TournamentController
         $user = $this->requireDirectorOrAdmin($request);
         $tournamentId = filter_var($params['id'] ?? null, FILTER_VALIDATE_INT);
         $teamId = null;
-        if ($user['role'] === 'admin') {
+        $canManageAnyTeam = AuthorizationService::hasCapability($user, 'tournaments.teams.manage');
+        if ($canManageAnyTeam) {
             $teamId = filter_var($request->query['team_id'] ?? null, FILTER_VALIDATE_INT);
             if ($teamId === false || $teamId < 1) {
                 Response::json(422, false, null, 'Para consultar la plantilla como administrador, indica un team_id válido.');
@@ -244,7 +262,7 @@ class TournamentController
             return;
         }
 
-        $team = $user['role'] === 'admin'
+        $team = $canManageAnyTeam
             ? $this->repository->getTeamForTournament($tournamentId, $teamId)
             : $this->repository->getTeamForDirector($tournamentId, $directorUserId);
         if ($team === null) {
@@ -262,7 +280,8 @@ class TournamentController
         $tournamentId = filter_var($params['id'] ?? null, FILTER_VALIDATE_INT);
         $directorUserId = null;
         $teamId = null;
-        if ($user['role'] === 'admin') {
+        $canManageAnyTeam = AuthorizationService::hasCapability($user, 'players.registration.manage');
+        if ($canManageAnyTeam) {
             $teamId = filter_var($request->body['team_id'] ?? null, FILTER_VALIDATE_INT);
             if ($teamId === false || $teamId < 1) {
                 Response::json(422, false, null, 'Para registrar al jugador como administrador, indica un team_id válido.');
@@ -281,21 +300,29 @@ class TournamentController
         }
 
         $body = $request->body;
-        foreach (['first_name', 'last_name', 'birth_date', 'phone', 'email'] as $field) {
+        foreach (['first_name', 'paternal_surname', 'maternal_surname', 'birth_date', 'phone', 'email'] as $field) {
             if (isset($body[$field]) && is_string($body[$field])) {
                 $body[$field] = trim($body[$field]);
-                if ($body[$field] === '' && $field !== 'first_name' && $field !== 'last_name') {
+                if ($body[$field] === '' && !in_array($field, ['first_name', 'paternal_surname', 'maternal_surname'], true)) {
                     $body[$field] = null;
                 }
             }
         }
         $errors = Validator::validate($body, [
             'first_name' => ['required', 'string'],
-            'last_name' => ['required', 'string'],
+            'paternal_surname' => ['required', 'string'],
+            'maternal_surname' => ['required', 'string'],
         ]);
-        foreach (['first_name' => 100, 'last_name' => 150, 'phone' => 30, 'email' => 150] as $field => $maxLength) {
+        foreach (['first_name' => 100, 'paternal_surname' => 150, 'maternal_surname' => 150, 'phone' => 30, 'email' => 150] as $field => $maxLength) {
             if (isset($body[$field]) && (!is_string($body[$field]) || strlen($body[$field]) > $maxLength)) {
                 $errors[$field][] = "El campo no puede exceder {$maxLength} caracteres.";
+            }
+        }
+        $lastName = '';
+        if (is_string($body['paternal_surname'] ?? null) && is_string($body['maternal_surname'] ?? null)) {
+            $lastName = $body['paternal_surname'] . ' ' . $body['maternal_surname'];
+            if (strlen($lastName) > 150) {
+                $errors['maternal_surname'][] = 'La longitud combinada de los apellidos no puede exceder 150 caracteres.';
             }
         }
         if (isset($body['email']) && $body['email'] !== '' && !filter_var($body['email'], FILTER_VALIDATE_EMAIL)) {
@@ -327,7 +354,7 @@ class TournamentController
                 $tournamentId,
                 [
                     'first_name' => $body['first_name'],
-                    'last_name' => $body['last_name'],
+                    'last_name' => $lastName,
                     'birth_date' => $body['birth_date'] ?? null,
                     'phone' => $body['phone'] ?? null,
                     'email' => $body['email'] ?? null,
@@ -343,7 +370,7 @@ class TournamentController
             return;
         }
 
-        $team = $user['role'] === 'admin'
+        $team = $canManageAnyTeam
             ? $this->repository->getTeamForTournament($tournamentId, $teamId)
             : $this->repository->getTeamForDirector($tournamentId, $directorUserId);
         if ($team === null) {
@@ -357,10 +384,76 @@ class TournamentController
     private function requireDirectorOrAdmin(Request $request): array
     {
         $user = AuthMiddleware::requireAuth($request->headers);
-        if (!in_array($user['role'] ?? null, ['director_tecnico', 'admin'], true)) {
+        if (!AuthorizationService::hasCapability($user, 'players.self.manage')) {
             throw new \App\Core\HttpException(403, 'Se requiere el rol de director técnico o administrador.');
         }
         return $user;
+    }
+
+    public function registrationOverride(Request $request, array $params): void
+    {
+        $actor = AuthMiddleware::requireCapability(
+            $request->headers,
+            'players.registration.override_deadline',
+        );
+        $ids = [];
+        foreach (['tournament_id', 'team_id', 'player_id'] as $field) {
+            $value = filter_var($request->body[$field] ?? null, FILTER_VALIDATE_INT);
+            if ($value === false || $value < 1) {
+                Response::json(422, false, null, 'Indica identificadores válidos para torneo, equipo y jugador.', [
+                    $field => ['Debe ser un entero positivo.'],
+                ]);
+                return;
+            }
+            $ids[$field] = $value;
+        }
+
+        $jerseyNumber = $request->body['jersey_number'] ?? null;
+        if (
+            $jerseyNumber !== null
+            && ((!is_int($jerseyNumber) && !(is_string($jerseyNumber) && ctype_digit($jerseyNumber)))
+                || (int) $jerseyNumber < 0
+                || (int) $jerseyNumber > 65535)
+        ) {
+            Response::json(422, false, null, 'jersey_number debe ser un entero entre 0 y 65535.', [
+                'jersey_number' => ['Indica un número de camiseta válido.'],
+            ]);
+            return;
+        }
+        $reason = $request->body['reason'] ?? null;
+        if (!is_string($reason) || trim($reason) === '' || strlen($reason) > 500) {
+            Response::json(422, false, null, 'El motivo es obligatorio y no puede exceder 500 caracteres.', [
+                'reason' => ['Escribe el motivo del registro excepcional.'],
+            ]);
+            return;
+        }
+
+        $ipAddress = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP);
+        try {
+            $this->registrationService->registerWithOverride(
+                $ids['tournament_id'],
+                $ids['team_id'],
+                $ids['player_id'],
+                $jerseyNumber === null ? null : (int) $jerseyNumber,
+                $actor,
+                $reason,
+                $ipAddress === false ? null : $ipAddress,
+            );
+        } catch (\DomainException $exception) {
+            $notFound = str_contains(strtolower($exception->getMessage()), 'no encontrado');
+            Response::json($notFound ? 404 : 409, false, null, $exception->getMessage());
+            return;
+        } catch (\InvalidArgumentException $exception) {
+            Response::json(422, false, null, $exception->getMessage());
+            return;
+        }
+
+        Response::json(201, true, [
+            'tournament_id' => $ids['tournament_id'],
+            'team_id' => $ids['team_id'],
+            'player_id' => $ids['player_id'],
+            'players' => $this->repository->getPlayersForTournament($ids['tournament_id']),
+        ], 'Jugador inscrito fuera del periodo con autorización de superadmin.');
     }
 
     private function validatePlayerRegistrationWindow(array $body, array &$errors, ?array $current = null): void
@@ -421,12 +514,25 @@ class TournamentController
         }
 
         try {
-            $created = $this->repository->addPlayerToTournament(
-                (int) $params['id'],
-                $teamId,
-                $playerId,
-                $jerseyNumber === null ? null : (int) $jerseyNumber
-            );
+            $actor = AuthMiddleware::requireAuth($request->headers);
+            if (($actor['role'] ?? null) === 'superadmin') {
+                $ipAddress = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP);
+                $created = $this->registrationService->registerAsSuperadmin(
+                    (int) $params['id'],
+                    $teamId,
+                    $playerId,
+                    $jerseyNumber === null ? null : (int) $jerseyNumber,
+                    $actor,
+                    $ipAddress === false ? null : $ipAddress,
+                );
+            } else {
+                $created = $this->repository->addPlayerToTournament(
+                    (int) $params['id'],
+                    $teamId,
+                    $playerId,
+                    $jerseyNumber === null ? null : (int) $jerseyNumber
+                );
+            }
         } catch (\DomainException $exception) {
             $notFound = str_contains($exception->getMessage(), 'no encontrado');
             Response::json($notFound ? 404 : 409, false, null, $exception->getMessage());
@@ -436,9 +542,111 @@ class TournamentController
         Response::json($created ? 201 : 200, true, $players, $created ? 'Jugador registrado.' : 'El jugador ya estaba inscrito.');
     }
 
+    public function registerPlayers(Request $request, array $params): void
+    {
+        $tournamentId = filter_var($params['id'] ?? null, FILTER_VALIDATE_INT);
+        $teamId = filter_var($request->body['team_id'] ?? null, FILTER_VALIDATE_INT);
+        $rawPlayerIds = $request->body['player_ids'] ?? null;
+        if ($tournamentId === false || $tournamentId < 1 || $teamId === false || $teamId < 1) {
+            Response::json(422, false, null, 'Indica identificadores válidos para el torneo y el equipo.');
+            return;
+        }
+        if (!is_array($rawPlayerIds) || $rawPlayerIds === [] || count($rawPlayerIds) > 100) {
+            Response::json(422, false, null, 'Selecciona entre 1 y 100 jugadores.', [
+                'player_ids' => ['Se requiere una lista de entre 1 y 100 jugadores.'],
+            ]);
+            return;
+        }
+        $playerIds = [];
+        foreach ($rawPlayerIds as $playerId) {
+            $validatedId = filter_var($playerId, FILTER_VALIDATE_INT);
+            if ($validatedId === false || $validatedId < 1) {
+                Response::json(422, false, null, 'La lista contiene un identificador de jugador inválido.', [
+                    'player_ids' => ['Cada identificador debe ser un entero positivo.'],
+                ]);
+                return;
+            }
+            $playerIds[] = $validatedId;
+        }
+        if (count(array_unique($playerIds)) !== count($playerIds)) {
+            Response::json(422, false, null, 'La lista no puede contener jugadores repetidos.', [
+                'player_ids' => ['Elimina los identificadores duplicados.'],
+            ]);
+            return;
+        }
+
+        try {
+            $actor = AuthMiddleware::requireAuth($request->headers);
+            if (($actor['role'] ?? null) === 'superadmin') {
+                $ipAddress = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP);
+                $created = $this->registrationService->registerManyAsSuperadmin(
+                    $tournamentId,
+                    $teamId,
+                    $playerIds,
+                    $actor,
+                    $ipAddress === false ? null : $ipAddress,
+                );
+            } else {
+                $created = $this->repository->addPlayersToTournament(
+                    $tournamentId,
+                    $teamId,
+                    $playerIds,
+                );
+            }
+        } catch (\DomainException $exception) {
+            $message = $exception->getMessage();
+            $notFound = str_contains($message, 'no encontrado');
+            Response::json($notFound ? 404 : 409, false, null, $message);
+            return;
+        } catch (\InvalidArgumentException $exception) {
+            Response::json(422, false, null, $exception->getMessage());
+            return;
+        }
+
+        Response::json(
+            201,
+            true,
+            $this->repository->getPlayersForTournament($tournamentId),
+            $created . ' jugador(es) registrado(s) correctamente.',
+        );
+    }
+
+    public function removePlayerFromRoster(Request $request, array $params): void
+    {
+        $tournamentId = filter_var($params['id'] ?? null, FILTER_VALIDATE_INT);
+        $registrationId = filter_var($params['registration_id'] ?? null, FILTER_VALIDATE_INT);
+        if ($tournamentId === false || $tournamentId < 1 || $registrationId === false || $registrationId < 1) {
+            Response::json(422, false, null, 'Los identificadores del torneo y de la inscripción deben ser enteros positivos.', [
+                'id' => ['Proporciona identificadores válidos.'],
+            ]);
+            return;
+        }
+
+        try {
+            $deleted = $this->repository->deleteTournamentPlayerRegistration($tournamentId, $registrationId);
+        } catch (\DomainException $exception) {
+            Response::json(409, false, null, $exception->getMessage());
+            return;
+        }
+
+        if (!$deleted) {
+            Response::json(404, false, null, 'No se encontró la inscripción del jugador en este torneo.');
+            return;
+        }
+
+        Response::json(200, true, [
+            'registration_id' => $registrationId,
+        ], 'Jugador eliminado de la plantilla del torneo; su registro en el catálogo se conservó.');
+    }
+
     public function players(Request $request, array $params): void
     {
-        $rows = $this->repository->getPlayersForTournament((int) $params['id']);
+        $user = AuthMiddleware::requireAuth($request->headers);
+        $rows = ($user['role'] ?? '') === 'director_tecnico'
+            ? (($team = $this->repository->getTeamForDirector((int) $params['id'], (int) $user['sub'])) === null
+                ? []
+                : $this->repository->getPlayersForTournamentTeam((int) $params['id'], (int) $team['tournament_team_id']))
+            : $this->repository->getPlayersForTournament((int) $params['id']);
         Response::json(200, true, $rows, 'Plantillas del torneo.');
     }
 

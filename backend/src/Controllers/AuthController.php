@@ -9,6 +9,8 @@ use App\Core\HttpException;
 use App\Core\Request;
 use App\Core\Response;
 use App\Core\Validator;
+use App\Middleware\AuthorizationService;
+use App\Services\UserAccessService;
 
 class AuthController
 {
@@ -26,7 +28,10 @@ class AuthController
         }
 
         $pdo = Database::getConnection();
-        $stmt = $pdo->prepare('SELECT * FROM users WHERE email = :email AND is_active = 1 LIMIT 1');
+        $stmt = $pdo->prepare(
+            'SELECT * FROM users
+             WHERE email = :email AND is_active = 1 AND deleted_at IS NULL LIMIT 1',
+        );
         $stmt->execute([':email' => $data['email']]);
         $user = $stmt->fetch();
 
@@ -39,11 +44,24 @@ class AuthController
             'sub' => (string) $user['id'],
             'email' => $user['email'],
             'role' => $user['role'],
+            'ver' => (int) ($user['auth_version'] ?? 0),
             'iat' => time(),
             'exp' => time() + (int) config('JWT_TTL', 3600),
             'iss' => (string) config('JWT_ISSUER', 'football-tournament-api'),
         ]);
 
-        Response::json(200, true, ['token' => $token, 'user' => ['id' => (int) $user['id'], 'email' => $user['email'], 'role' => $user['role']]], 'Autenticación correcta.');
+        $session = (new UserAccessService())->sessionData((int) $user['id']);
+        Response::json(200, true, ['token' => $token, 'user' => $session], 'Autenticación correcta.');
+    }
+
+    public function me(Request $request, array $params): void
+    {
+        $user = AuthorizationService::requireCapability($request->headers, 'users.session.read');
+        Response::json(
+            200,
+            true,
+            (new UserAccessService())->sessionData((int) $user['sub']),
+            'Sesión consultada.',
+        );
     }
 }

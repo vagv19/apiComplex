@@ -8,6 +8,7 @@ use App\Core\Request;
 use App\Core\Response;
 use App\Core\Validator;
 use App\Middleware\AuthMiddleware;
+use App\Middleware\AuthorizationService;
 use App\Repositories\PlayerRepository;
 use App\Services\PlayerPhotoService;
 use DomainException;
@@ -63,7 +64,7 @@ class PlayerController
     public function uploadPhoto(Request $request, array $params): void
     {
         $user = AuthMiddleware::requireAuth($request->headers);
-        if (!in_array($user['role'] ?? null, ['admin', 'director_tecnico'], true)) {
+        if (!AuthorizationService::hasCapability($user, 'players.photo.self')) {
             throw new \App\Core\HttpException(403, 'Se requiere el rol de administrador o director técnico.');
         }
 
@@ -73,7 +74,7 @@ class PlayerController
             return;
         }
 
-        if (($user['role'] ?? null) === 'director_tecnico') {
+        if (!AuthorizationService::hasCapability($user, 'players.photo.manage')) {
             $directorUserId = filter_var($user['sub'] ?? null, FILTER_VALIDATE_INT);
             if ($directorUserId === false || $directorUserId < 1) {
                 throw new \App\Core\HttpException(403, 'El identificador del director técnico no es válido.');

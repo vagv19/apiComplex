@@ -61,11 +61,16 @@ function nowIso(): string {
 }
 
 function signToken(array $payload): string {
-    $secret = (string) config('JWT_SECRET', 'development-secret');
-    $header = base64_encode(json_encode(['alg' => 'HS256', 'typ' => 'JWT'], JSON_THROW_ON_ERROR));
-    $body = base64_encode(json_encode($payload, JSON_THROW_ON_ERROR));
+    $secret = jwtSecret();
+    $payload['ver'] ??= 0;
+    $audience = config('JWT_AUDIENCE');
+    if (is_string($audience) && $audience !== '') {
+        $payload['aud'] = $audience;
+    }
+    $header = base64UrlEncode(json_encode(['alg' => 'HS256', 'typ' => 'JWT'], JSON_THROW_ON_ERROR));
+    $body = base64UrlEncode(json_encode($payload, JSON_THROW_ON_ERROR));
     $signature = hash_hmac('sha256', $header . '.' . $body, $secret, true);
-    return $header . '.' . $body . '.' . base64_encode($signature);
+    return $header . '.' . $body . '.' . base64UrlEncode($signature);
 }
 
 function verifyToken(string $token): ?array {
@@ -75,28 +80,77 @@ function verifyToken(string $token): ?array {
     }
 
     [$headerB64, $payloadB64, $signatureB64] = $parts;
-    $secret = (string) config('JWT_SECRET', 'development-secret');
+    $headerJson = base64UrlDecode($headerB64);
+    $payloadJson = base64UrlDecode($payloadB64);
+    $signature = base64UrlDecode($signatureB64);
+    if ($headerJson === false || $payloadJson === false || $signature === false) {
+        return null;
+    }
+    try {
+        $header = json_decode($headerJson, true, 512, JSON_THROW_ON_ERROR);
+        $payload = json_decode($payloadJson, true, 512, JSON_THROW_ON_ERROR);
+    } catch (Throwable) {
+        return null;
+    }
+    if (!is_array($header) || ($header['alg'] ?? null) !== 'HS256' || ($header['typ'] ?? null) !== 'JWT' || !is_array($payload)) {
+        return null;
+    }
+
+    $secret = jwtSecret();
     $expected = hash_hmac('sha256', $headerB64 . '.' . $payloadB64, $secret, true);
-    if (!hash_equals(base64_encode($expected), $signatureB64)) {
+    if (!hash_equals($expected, $signature)) {
         return null;
     }
 
     try {
-        $payload = json_decode(base64_decode($payloadB64, true) ?: '', true, 512, JSON_THROW_ON_ERROR);
         $issuedAt = (int) ($payload['iat'] ?? 0);
         $expiresAt = (int) ($payload['exp'] ?? 0);
-        $issuer = (string) ($payload['iss'] ?? '');
+        $issuer = config('JWT_ISSUER');
+        $audience = config('JWT_AUDIENCE');
 
-        if ($issuedAt <= 0 || $expiresAt <= 0 || $issuer !== (string) config('JWT_ISSUER', 'football-tournament-api')) {
+        if (
+            $issuedAt <= 0
+            || $issuedAt > time() + 60
+            || $expiresAt <= time()
+            || $expiresAt <= $issuedAt
+            || (is_string($issuer) && $issuer !== '' && ($payload['iss'] ?? null) !== $issuer)
+        ) {
             return null;
         }
-
-        if (time() > $expiresAt) {
+        if (isset($payload['nbf']) && (!is_numeric($payload['nbf']) || (int) $payload['nbf'] > time())) {
             return null;
         }
-
+        if (is_string($audience) && $audience !== '') {
+            $tokenAudiences = $payload['aud'] ?? null;
+            if (!is_array($tokenAudiences)) {
+                $tokenAudiences = [$tokenAudiences];
+            }
+            if (!in_array($audience, $tokenAudiences, true)) {
+                return null;
+            }
+        }
         return $payload;
     } catch (Throwable) {
         return null;
     }
+}
+
+function jwtSecret(): string {
+    $secret = config('JWT_SECRET');
+    if (!is_string($secret) || strlen($secret) < 32 || $secret === 'development-secret') {
+        throw new RuntimeException('JWT_SECRET debe configurarse con al menos 32 caracteres.');
+    }
+    return $secret;
+}
+
+function base64UrlEncode(string $value): string {
+    return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+}
+
+function base64UrlDecode(string $value): string|false {
+    if ($value === '' || preg_match('/^[A-Za-z0-9_-]+$/', $value) !== 1) {
+        return false;
+    }
+    $padding = (4 - (strlen($value) % 4)) % 4;
+    return base64_decode(strtr($value . str_repeat('=', $padding), '-_', '+/'), true);
 }

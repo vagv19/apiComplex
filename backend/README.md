@@ -8,7 +8,9 @@ Backend REST API for tournament administration built in native PHP and PDO.
 - Tournament lifecycle and registration management
 - Round and match scheduling
 - Results and standings calculations
-- Basic auth with signed bearer tokens
+- Bearer authentication with role capabilities and active-account checks
+- Superadmin-only, audited player-registration overrides
+- Administrative audit log
 - SQLite-compatible test environment for local validation
 
 ## Setup
@@ -16,9 +18,20 @@ Backend REST API for tournament administration built in native PHP and PDO.
 1. Copy `.env.example` to `.env` and set the existing MySQL database name and credentials.
 2. For a new database, run `database/schema.sql` once; it creates the `football_tournaments` database and tables.
 3. The SQLite schema at `database/schema.sqlite.sql` is used only for local tests.
-4. Apply `database/migrations/001_create_users.sql` and create an administrator account before using the admin application. For an existing tournament database, apply `database/migrations/005_assign_director_to_tournament_team.sql` and then `database/migrations/006_use_tournament_team_coaches.sql`; the latter migrates assignments from the earlier `director_user_id` column when present. Apply `database/migrations/007_player_registration_window.sql` to add the registration timestamps if they are not already present. Apply `database/migrations/002_match_details_and_discipline.sql`; if its match-report tables predate the current API schema, also apply `database/migrations/003_repair_existing_match_report_schema.sql` followed by `database/migrations/004_align_match_report_to_attached_schema.sql`.
-5. Optionally populate seed data from `database/seeders/initial_data.sql` in the SQLite test database.
-6. With XAMPP running, access the API at:
+4. For an existing tournament database, apply `database/migrations/005_assign_director_to_tournament_team.sql` and then `database/migrations/006_use_tournament_team_coaches.sql`; the latter migrates assignments from the earlier `director_user_id` column when present. Apply `database/migrations/007_player_registration_window.sql` to add the registration timestamps if they are not already present. Apply `database/migrations/002_match_details_and_discipline.sql`; if its match-report tables predate the current API schema, also apply `database/migrations/003_repair_existing_match_report_schema.sql` followed by `database/migrations/004_align_match_report_to_attached_schema.sql`. Apply `database/migrations/008_superadmin_authorization_audit.sql` and then `database/migrations/009_user_access_management.sql`. These migrations preserve existing accounts and do not promote anyone to superadmin.
+5. Configure `JWT_SECRET` in `backend/.env` with at least 32 random characters; the API deliberately fails closed if it is missing or too short. Generate a value with `php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"`. Keep it out of source control. Configure `JWT_ISSUER`; set `JWT_AUDIENCE` only when the same value is configured for the API clients.
+6. Create the first superadmin from the backend directory, without placing the password in shell history:
+
+   ```powershell
+   $securePassword = Read-Host "New superadmin password" -AsSecureString
+   $env:SUPERADMIN_BOOTSTRAP_PASSWORD = [Net.NetworkCredential]::new("", $securePassword).Password
+   php bin/create-superadmin.php admin@example.com "Tournament Superadmin"
+   Remove-Item Env:SUPERADMIN_BOOTSTRAP_PASSWORD
+   ```
+
+   The command requires MySQL, hashes the password with `password_hash()`, and refuses to create another account while an active superadmin exists. Run it from a trusted host and clear the environment variable after use. New user accounts must be created with an explicit role; no role is assigned by default.
+7. Optionally populate seed data from `database/seeders/initial_data.sql` in the SQLite test database.
+8. With XAMPP running, access the API at:
 
    `http://127.0.0.1/apiComplex/backend/public/api/v1`
 
@@ -33,13 +46,51 @@ php -S 127.0.0.1:8000 public/index.php
 
 `/api/v1`
 
+## HTTP methods and authorization
+
+Functional API routes use only `GET` for reads and `POST` for all changes. The
+API does not register `PUT`, `PATCH`, or `DELETE` operations; requests using an
+unsupported method against a known route receive `405` with
+`Allow: GET, POST, OPTIONS`. `OPTIONS` is handled only by CORS preflight.
+Destructive actions remain soft deletes or domain-specific cancellation
+operations where that is the existing business behavior.
+
+Every route declares a capability enforced in the router. `superadmin` inherits
+all `admin` capabilities and additionally receives
+`players.registration.override_deadline`, `system.audit.read`, `users.manage`,
+`roles.manage`, `modules.manage`, and `users.password.reset`. Administrators can
+create admin and director accounts, but can manage director accounts only; only
+superadmins can manage administrator/superadmin accounts or create a
+superadmin. Only superadmins can change roles. Directors cannot administer
+users, roles, or permissions.
+
+Protected access resolves the account's current active status, role, deletion
+state, forced-password-change flag, and `auth_version` from MySQL on each
+request. Module assignment is an additional restriction and cannot expand a
+role's capability ceiling. Superadmins can access all modules regardless of
+individual assignments. Director tournament queries are limited to tournaments
+with an active team assignment, and team/player lists are filtered to their
+assigned team.
+
 ## Example routes
 
+- `GET /api/v1/dashboard`
 - `GET /api/v1/categories`
 - `POST /api/v1/teams`
+- `POST /api/v1/teams/{id}/delete`
 - `POST /api/v1/players/{id}/photo`
+- `POST /api/v1/players/{id}/delete`
 - `GET /api/v1/tournaments`
 - `POST /api/v1/tournaments`
+- `GET /api/v1/tournaments/logical`
+- `POST /api/v1/tournaments/logical`
+- `GET /api/v1/tournaments/logical/available-categories`
+- `GET /api/v1/tournaments/logical/{logical_id}`
+- `POST /api/v1/tournaments/logical/{logical_id}/details`
+- `POST /api/v1/tournaments/logical/{logical_id}/rules`
+- `POST /api/v1/tournaments/logical/{logical_id}/categories`
+- `POST /api/v1/tournaments/logical/{logical_id}/categories/remove`
+- `POST /api/v1/tournaments/logical/{logical_id}/retire`
 - `POST /api/v1/tournaments/{id}/teams`
 - `GET /api/v1/tournaments/{id}/teams`
 - `POST /api/v1/tournaments/{id}/teams/{team_id}/director`
@@ -47,6 +98,8 @@ php -S 127.0.0.1:8000 public/index.php
 - `POST /api/v1/tournaments/{id}/my-team/players`
 - `GET /api/v1/tournaments/{id}/players`
 - `POST /api/v1/tournaments/{id}/players`
+- `POST /api/v1/tournaments/{id}/players/batch`
+- `DELETE /api/v1/tournaments/{id}/players/{registration_id}`
 - `POST /api/v1/matches/{id}/result`
 - `POST /api/v1/matches/{id}/schedule`
 - `GET /api/v1/matches/by-date?date=YYYY-MM-DD`
@@ -55,13 +108,71 @@ php -S 127.0.0.1:8000 public/index.php
 - `POST /api/v1/matches/{id}/report`
 - `POST /api/v1/tournaments/{id}/status`
 - `POST /api/v1/tournaments/{id}/player-registration`
+- `POST /api/v1/tournaments/{id}/groups/cancel`
 - `POST /api/v1/expulsion-reasons/{id}`
+- `POST /api/v1/expulsion-reasons/{id}/delete`
+- `POST /api/v1/players/registration-override`
+- `GET /api/v1/audit` (superadmin)
+- `GET /api/v1/users` (admin: admin accounts read-only and manageable directors; superadmin: all)
+- `GET /api/v1/users/{id}`
+- `GET /api/v1/users/{id}/modules`
+- `GET /api/v1/users/{id}/teams`
+- `GET /api/v1/users/{id}/audit`
+- `GET /api/v1/roles`
+- `GET /api/v1/modules`
+- `GET /api/v1/permissions`
+- `GET /api/v1/auth/me`
+- `POST /api/v1/users/create`
+- `POST /api/v1/users/update`
+- `POST /api/v1/users/change-role` (superadmin)
+- `POST /api/v1/users/soft-delete`
+- `POST /api/v1/users/restore`
+- `POST /api/v1/users/assign-modules`
+- `POST /api/v1/users/assign-teams`
+- `POST /api/v1/users/remove-team`
+- `POST /api/v1/users/change-password`
+- `POST /api/v1/users/reset-password`
 - `GET /api/v1/public/tournaments`
 - `GET /api/v1/public/facilities/images`
 - `GET /api/v1/public/facilities/images/{filename}`
 - `GET /api/v1/public/tournaments/{id}/top-scorers`
 - `GET /api/v1/public/tournaments/{id}/images`
 - `GET /api/v1/public/tournaments/{id}/images/{filename}`
+
+### Dashboard summary
+
+`GET /api/v1/dashboard` requires an administrator or superadmin bearer token
+with the dashboard module enabled. It returns the total number of tournaments,
+the number of active categories, teams, and players, and up to five most
+recently created tournaments. A count is `null` when the corresponding module
+is not available to the user; `recent_tournaments` is `null` without tournament
+module access.
+
+```json
+{
+  "success": true,
+  "data": {
+    "counts": {
+      "tournaments": 3,
+      "categories": 2,
+      "teams": 8,
+      "players": 24
+    },
+    "recent_tournaments": [
+      {
+        "id": 12,
+        "category_id": 2,
+        "category_name": "Libre",
+        "name": "Torneo de verano",
+        "format": "LEAGUE",
+        "status": "REGISTRATION",
+        "created_at": "2026-11-16 12:00:00"
+      }
+    ]
+  },
+  "message": "Resumen consultado."
+}
+```
 
 ### Upload a player photo
 
@@ -91,10 +202,15 @@ Create a player in the permanent catalogue with `POST /api/v1/players`
 then register that player to an active tournament team with
 `POST /api/v1/tournaments/{id}/players`. Use
 `GET /api/v1/tournaments/{id}/teams` to list selectable teams. The registration
-request requires `team_id` and `player_id`; the optional `jersey_number` must be
-an integer from 0 to 65535 and must be unique within that tournament team.
-The registration endpoint enforces the tournament's player-registration
-settings and cutoff and returns the tournament roster in `data`.
+request requires an authenticated admin or superadmin with
+`players.registration.manage`, plus `team_id` and `player_id`; the optional
+`jersey_number` must be an integer from 0 to 65535 and must be unique within
+that tournament team.
+The registration endpoint enforces `player_registration_enabled`, configured
+opening/closing timestamps, and `player_registration_deadline_round`. The round
+cutoff uses actual scheduled-for-today, in-progress, or completed real matches;
+generated future rounds and byes do not advance it. The endpoint returns the
+tournament roster in `data`.
 
 ```json
 {
@@ -117,6 +233,32 @@ already registered player returns HTTP `200` and the current roster.
 Invalid fields return `422`; a closed registration, duplicate jersey, or other
 business-rule conflict returns `409`; a missing tournament or player returns
 `404`. Player creation and tournament registration run in a single transaction.
+Superadmins can use this same endpoint outside the configured registration
+window or cutoff, including when registration is disabled. Their authenticated
+identity and the exception are recorded in the audit log in the registration
+transaction. This does not bypass active-player status, tournament-team
+membership, duplicate registration, or unique jersey-number constraints;
+administrators remain subject to the configured registration rules.
+
+To register several existing bank players to the same team atomically, use
+`POST /api/v1/tournaments/{id}/players/batch` with `team_id` and a distinct
+`player_ids` array containing 1 to 100 active player IDs:
+
+```json
+{
+  "team_id": 12,
+  "player_ids": [42, 43, 44]
+}
+```
+
+The endpoint requires `players.registration.manage` and applies the same
+registration-window and authorization rules as individual registration.
+Registration of the full selection is transactional: if one player is invalid
+or already registered, the request returns an error and does not partially
+register the others. Success returns HTTP `201`, the updated tournament roster
+in `data`, and a message with the number of registered players. Invalid or
+duplicate IDs return `422`; registration policy or roster conflicts return
+`409`. Superadmin registrations retain the existing audited deadline override.
 
 ### Director-to-team assignment
 
@@ -143,15 +285,178 @@ for the selected tournament:
   team is derived from the token; an administrator must pass `team_id` as a
   query parameter.
 - `POST /api/v1/tournaments/{id}/my-team/players` accepts the same roles and
-  player profile fields plus `jersey_number`. Catalog creation and tournament
-  registration run in one transaction. A director's team is derived from the
-  token and ignores any submitted `team_id`; an administrator must send the
-  target `team_id` in the JSON body.
+  player profile fields plus `jersey_number`. `first_name`, `paternal_surname`,
+  and `maternal_surname` are required; the two surnames are combined into the
+  catalog's `last_name` field. Catalog creation and tournament registration run
+  in one transaction. A director's team is derived from the token and ignores
+  any submitted `team_id`; an administrator must send the target `team_id` in
+  the JSON body.
+- `DELETE /api/v1/tournaments/{id}/players/{registration_id}` requires the
+  `players.registration.manage` capability. It removes only the
+  `tournament_players` registration; the catalogue record in `players` is
+  retained. Both path parameters must be positive integers; no request body is
+  required. Success returns `200` with
+  `{"success":true,"data":{"registration_id":42},"message":"..."}`. Invalid
+  identifiers return `422`, a registration missing from that tournament
+  returns `404`, and match attendance, goals, or disciplinary events referencing
+  the registration return `409` to preserve match history.
+
+Example request body:
+
+```json
+{
+  "first_name": "Luis Fernando",
+  "paternal_surname": "García",
+  "maternal_surname": "Martínez",
+  "birth_date": "2000-01-02",
+  "jersey_number": 8
+}
+```
 
 An unassigned director receives `404`; a closed registration, duplicate jersey,
 or conflicting assignment receives `409`. Invalid or missing admin team IDs
 and invalid player fields return `422`; callers without the required role
 receive `401` or `403`.
+
+### Superadmin registration override
+
+`POST /api/v1/players/registration-override` requires a superadmin bearer token.
+It registers an existing active catalogue player to an active team in the
+specified tournament even when the ordinary registration window, enabled flag,
+or round cutoff would reject the registration. The reason is mandatory and the
+registration plus audit record are committed in the same transaction. The
+override does not bypass tournament-team membership, active-player status,
+duplicate registration, or unique jersey-number constraints.
+
+```http
+POST /api/v1/players/registration-override
+Authorization: Bearer <superadmin-token>
+Content-Type: application/json
+
+{
+  "tournament_id": 7,
+  "team_id": 12,
+  "player_id": 42,
+  "jersey_number": 10,
+  "reason": "Autorización excepcional del comité."
+}
+```
+
+Missing or invalid IDs and missing/blank reasons return `422`; insufficient
+permissions return `403`; missing tournament/player records return `404`;
+duplicate or inconsistent registrations return `409`. The actor is always
+derived from the validated bearer token, never from the request body.
+
+### Audit history
+
+`GET /api/v1/audit?page=1&limit=50` requires `system.audit.read` (currently
+superadmin only). It returns paginated administrative audit records, including
+the actor, role, action, entity, tournament, reason, before/after values, IP
+address, and timestamp. The API exposes no update or delete operation for audit
+records. Result changes and registration overrides are written to the audit
+table within their domain transaction; result changes are also retained in
+`match_result_history`.
+
+### Applying and rolling back migration 008
+
+Apply the migration after the existing migrations using the MySQL CLI:
+
+```bash
+mysql --database=football_tournaments < database/migrations/008_superadmin_authorization_audit.sql
+```
+
+It adds `users.auth_version`, removes the privileged default role, installs a
+trigger that increments the version when a role or active flag changes, and
+creates `admin_audit_log`. It does not modify existing roles or passwords.
+There is intentionally no destructive rollback for the audit table or version
+column: to roll back application code, restore the previous application while
+retaining these additive schema changes and audit records. Tokens created by
+the new JWT format require users to sign in again after deployment.
+
+### User, role, and module administration
+
+Apply migration 009 after migration 008:
+
+```bash
+mysql --database=football_tournaments < database/migrations/009_user_access_management.sql
+```
+
+The migration adds `users.deleted_at` for logical deletion and
+`users.must_change_password` for temporary password resets. It reuses the
+existing `users` table, `password_hash`, and `auth_version`; it does not create
+another identity table or remove records. It creates `system_modules` and
+`user_modules`, seeds the modules represented by the frontend, and grants
+existing active admins/directors role-appropriate initial modules. The
+`tournament_team_coaches` relation remains the source of director-team
+assignments. Module edits do not grant capabilities excluded by the role.
+
+All endpoints below require a bearer token. User responses never contain
+`password_hash` or `auth_version`.
+
+`GET /api/v1/users?page=1&limit=20&search=ana&role=director_tecnico&is_active=1&sort_by=name&sort_order=asc`
+returns a paginated directory. `search`, `role`, and `is_active` are optional;
+`sort_by` is allowlisted. Admins see admin accounts in read-only mode and can
+manage director accounts; superadmins see all roles.
+
+Create a user with `POST /api/v1/users/create`:
+
+```json
+{
+  "name": "Ana López",
+  "email": "ana@example.com",
+  "password": "use-a-unique-12-character-password",
+  "confirm_password": "use-a-unique-12-character-password",
+  "role": "director_tecnico",
+  "is_active": true,
+  "modules": ["dashboard", "teams", "rosters"],
+  "assignments": [
+    {"tournament_id": 12, "tournament_team_id": 35}
+  ]
+}
+```
+
+The endpoint hashes the password and transactionally stores the user,
+role-limited module assignments, optional director-team assignments, and audit
+record. Admins may create admin and director accounts; only superadmins may
+create superadmins. Team assignments are accepted only for `director_tecnico`;
+admin accounts are created without team assignments. Duplicate email returns
+`409`, invalid fields return `422`, and forbidden role creation returns `403`.
+
+`POST /api/v1/users/update` accepts `user_id`, `name`, `email`, and an optional
+`modules` array. Use `POST /api/v1/users/change-role` with `user_id` and `role`
+to change a role (superadmin only). This invalidates previous tokens and keeps
+only modules allowed by the new role. `POST /api/v1/users/assign-modules`
+accepts `user_id` and the complete replacement `modules` array; an empty array
+removes all non-superadmin module access.
+
+`POST /api/v1/users/soft-delete` accepts `user_id` and a required `reason`.
+It sets `is_active = 0`, sets `deleted_at`, increments `auth_version`, and
+preserves the account and all relations. `POST /api/v1/users/restore` accepts
+`user_id`; it clears `deleted_at`, activates the account, and invalidates old
+tokens. The last active superadmin cannot be deactivated, deleted, or demoted.
+No API route physically deletes a user.
+
+`POST /api/v1/users/reset-password` accepts `user_id`. It returns one
+cryptographically generated temporary password once, sets
+`must_change_password`, increments `auth_version`, and excludes the password
+from audit data. The user must sign in with that password and change it through
+`POST /api/v1/users/change-password` (`current_password`, `new_password`,
+`confirm_password`) before accessing other protected routes. The change
+endpoint returns a replacement token after invalidating prior sessions.
+
+Director assignments use `POST /api/v1/users/assign-teams` with
+`user_id` and `assignments` (`tournament_id`, `tournament_team_id` pairs).
+`POST /api/v1/users/remove-team` accepts `user_id`, `tournament_team_id`, and a
+required reason. These operations reuse `tournament_team_coaches`, enforce the
+existing one-team-per-director-per-tournament rule, and write audit records.
+`GET /api/v1/users/{id}/teams` and `GET /api/v1/users/{id}/audit` are read-only.
+
+Role capabilities remain defined centrally in `RolePermissions`; `GET
+/api/v1/permissions` exposes that matrix for the interface. The backend checks
+capability and module access independently on each protected route. A module
+assignment therefore never grants a write permission that the role does not
+have. `GET /api/v1/auth/me` returns the current account, assigned modules, and
+role capability list for menu construction and route guards.
 
 ### Torneos públicos activos
 
@@ -378,15 +683,174 @@ league in draft status.
 The endpoint responds with HTTP `201` and the tournament under `data`, using
 the API field names (`format`, `points_for_win`, and similar). Invalid fields
 return `422`; an unknown or inactive category returns `404`.
+If both player-registration timestamps are omitted, the opening defaults to
+the tournament creation time and the closing defaults to 20 days later. The
+same default applies when adding a category competition to a logical
+tournament. Supplying both timestamps explicitly overrides the default.
 
 The PDO repository maps these API names to the installed MySQL tournament
 columns (`tournament_type`, `points_win`, `regular_rounds`, and related
 columns), so API names remain consistent for the frontend.
 
-Player enrollment is controlled only by `player_registration_start_at` and
-`player_registration_end_at`, in the `YYYY-MM-DD HH:MM:SS` format. Both values
-must be set and the current database time must be inside the inclusive range.
-If either value is `null`, registration is closed. Tournament status,
+### Logical multi-category tournaments
+
+These authenticated management routes are available to `admin` and
+`superadmin` users. They do not change the existing numeric
+`/api/v1/tournaments` routes: those routes still identify one category-specific
+competition used by scheduling, registration, results, and standings.
+
+The logical API uses collision-free string IDs: `group-<id>` identifies a row
+in `tournament_masters`, while `single-<id>` represents an older competition
+whose `master_tournament_id` is `NULL`. Neither ID is the numeric
+`tournament_id` of a category competition. Each category in a logical response
+includes its actual numeric `tournament_id` for existing sports modules.
+
+`GET /api/v1/tournaments/logical?page=1&limit=15` returns a paginated
+collection containing grouped tournaments and standalone legacy competitions.
+The page size is limited to 100. `GET /api/v1/tournaments/logical/{logical_id}`
+returns one logical entity.
+`GET /api/v1/tournaments/logical/available-categories` returns active
+categories; optionally pass `logical_id=group-<id>` to exclude categories
+already linked to that group. Pagination uses the same `page` and `limit`
+parameters.
+
+```json
+{
+  "success": true,
+  "message": "Torneo lógico consultado.",
+  "data": {
+    "id": "group-12",
+    "name": "Copa de otoño",
+    "description": null,
+    "season": "2026",
+    "start_date": "2026-10-20",
+    "end_date": "2026-12-15",
+    "status": "ACTIVE",
+    "categories": [
+      {
+        "tournament_id": 45,
+        "category_id": 1,
+        "category_name": "Senior",
+        "tournament_name": "Copa de otoño-Senior",
+        "status": "REGISTRATION",
+        "player_registration_start_at": "2026-01-15 12:00:00",
+        "player_registration_end_at": "2026-02-04 12:00:00"
+      }
+    ],
+    "category_count": 1,
+    "rules_consistent": true,
+    "rules": {
+      "format": "LEAGUE",
+      "status": "REGISTRATION",
+      "points_for_win": 3,
+      "points_for_draw": 1,
+      "points_for_loss": 0,
+      "rounds_count": 10,
+      "qualified_teams": 8,
+      "player_registration_deadline_round": 4,
+      "allow_player_registration": true,
+      "player_registration_start_at": "2026-01-15 12:00:00",
+      "player_registration_end_at": "2026-02-04 12:00:00",
+      "tie_breakers": null
+    },
+    "created_at": "2026-01-15 12:00:00"
+  }
+}
+```
+
+`POST /api/v1/tournaments/logical` creates the logical record and one
+category-specific competition for every distinct active `category_id`, in one
+transaction. General fields are `name`, optional `description`, `season`,
+`start_date`, `end_date`, and master `status` (`DRAFT`, `ACTIVE`, `COMPLETED`,
+or `CANCELLED`). Each child competition is named
+`{name}-{category_name}`. The combined name must fit the existing 150-character
+competition name field. Rules are supplied in a nested object using the
+existing tournament API fields:
+
+```json
+{
+  "name": "Copa de otoño",
+  "description": "Competencia anual",
+  "season": "2026",
+  "start_date": "2026-10-20",
+  "end_date": "2026-12-15",
+  "status": "DRAFT",
+  "category_ids": [1, 2],
+  "rules": {
+    "format": "LEAGUE",
+    "status": "REGISTRATION",
+    "points_for_win": 3,
+    "points_for_draw": 1,
+    "points_for_loss": 0,
+    "rounds_count": 10,
+    "qualified_teams": 8,
+    "player_registration_deadline_round": 4,
+    "allow_player_registration": true,
+    "tie_breakers": null
+  }
+}
+```
+
+When the timestamps are omitted during creation, each category competition
+starts its registration window at creation and closes it 20 days later. The
+logical response exposes the current window and actual competition name for
+each category. Window dates are managed per category; updating shared rules
+without timestamp fields preserves each category's existing window. If either
+timestamp is explicitly included in a logical rules update, the resulting
+window is applied to all categories.
+
+`POST /api/v1/tournaments/logical/{logical_id}/details` updates only the
+provided general fields and propagates name and dates to every category
+competition. `POST /api/v1/tournaments/logical/{logical_id}/rules` accepts
+`{"rules":{...}}`, merges the supplied values with the current settings, and
+updates every associated competition. A format change is rejected once any
+category has stages. `rules_consistent` reports differences in shared
+competition settings, not per-category registration windows; updating shared
+rules synchronizes those settings without changing category windows unless
+timestamps were explicitly supplied. For grouped tournaments,
+the master status follows the competition status: `DRAFT` remains `DRAFT`,
+`REGISTRATION` and `IN_PROGRESS` map to `ACTIVE`, and `COMPLETED` or
+`CANCELLED` map directly. Updating the logical tournament name also updates
+each child name using the current category name.
+
+`POST /api/v1/tournaments/logical/{logical_id}/categories` accepts
+`{"category_id":3}` and creates a competition named
+`{tournament_name}-{category_name}` using the logical tournament's shared
+settings. `POST /api/v1/tournaments/logical/{logical_id}/categories/remove`
+accepts the same
+body, requires at least one other category to remain, and refuses removal if
+the category has registrations, phases, rounds, matches, or match-related
+activity. A successful removal preserves the competition row, marks it
+`CANCELLED`, and detaches it as a standalone record; it does not delete data.
+The category's numeric tournament ID remains valid for old sports references.
+
+`POST /api/v1/tournaments/logical/{logical_id}/retire` accepts an optional
+`{"reason":"..."}`. It marks the logical tournament and its category
+competitions `CANCELLED` without deleting data, but only when there are no
+registered teams/players, phases, rounds, matches, results, goals, attendance,
+disciplinary events, or suspensions. Repeating retirement is safe and does
+not create duplicate audit events.
+State-changing creates, edits, category changes, and retirements are written to
+the existing administrative audit log in the same transaction.
+
+Invalid IDs, fields, dates, rules, or duplicate category IDs return `422`;
+missing or inactive categories return `404`; attempted changes that conflict
+with existing sports activity or lifecycle rules return `409`. Older
+single-category rows remain independent and are not automatically migrated or
+rewritten. They can be read, have supported name/date and competition rule
+fields edited, and be retired through the logical API, but cannot be converted
+into a multi-category group or have categories attached to them. All these
+operations use the existing tables and columns; no schema change or migration
+is required. The deployed MySQL schema was verified to contain these objects;
+the repository's SQL/SQLite test schemas are intentionally unchanged, so a
+fresh database without these existing objects is not supported by this
+no-DDL implementation.
+
+Player enrollment uses `player_registration_start_at` and
+`player_registration_end_at`, in the `YYYY-MM-DD HH:MM:SS` format. Each
+non-null timestamp is enforced as a boundary; if both are `null`, there is no
+date-based restriction. New tournaments default to an opening at creation and
+a closing 20 days later. Tournament status,
 `allow_player_registration`, and `player_registration_deadline_round` do not
 affect enrollment. The create response and tournament listings include both
 timestamps and a computed `player_registration_open` boolean.

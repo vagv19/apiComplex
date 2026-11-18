@@ -40,6 +40,8 @@ final class MatchReportController
                 (int) $params['id'],
                 $request->body,
                 isset($actor['sub']) && ctype_digit((string) $actor['sub']) ? (int) $actor['sub'] : null,
+                (string) ($actor['role'] ?? ''),
+                filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP) ?: null,
             );
             Response::json(200, true, $saved, 'Marcador del partido guardado.');
         } catch (\DomainException $exception) {

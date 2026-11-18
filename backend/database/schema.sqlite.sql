@@ -5,11 +5,76 @@ CREATE TABLE IF NOT EXISTS users (
     name VARCHAR(120) NOT NULL,
     email VARCHAR(150) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
-    role VARCHAR(30) NOT NULL DEFAULT 'admin',
+    role VARCHAR(30) NOT NULL,
+    auth_version INTEGER NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    deleted_at DATETIME,
+    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS system_modules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code VARCHAR(80) NOT NULL UNIQUE,
+    name VARCHAR(120) NOT NULL,
+    description VARCHAR(255),
+    parent_id INTEGER,
+    route VARCHAR(160),
+    icon VARCHAR(50),
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (parent_id) REFERENCES system_modules(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_modules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    module_id INTEGER NOT NULL,
+    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, module_id),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (module_id) REFERENCES system_modules(id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_modules_module ON user_modules(module_id, is_enabled);
+
+INSERT OR IGNORE INTO system_modules (code, name, description, route, icon, sort_order) VALUES
+    ('dashboard', 'Resumen', 'Resumen general del sistema.', '/', 'home', 10),
+    ('tournaments', 'Torneos', 'Administración de torneos.', '/tournaments', 'trophy', 20),
+    ('categories', 'Categorías', 'Administración de categorías.', '/categories', 'categories', 30),
+    ('teams', 'Equipos', 'Catálogo y equipos asignados.', '/teams', 'flag', 40),
+    ('players', 'Jugadores', 'Catálogo de jugadores.', '/players', 'player', 50),
+    ('rosters', 'Plantillas', 'Plantillas y registros de torneo.', '/rosters', 'roster', 60),
+    ('schedule', 'Calendario', 'Jornadas y programación.', '/schedule', 'calendar', 70),
+    ('matchday', 'Partidos del día', 'Consulta de partidos por fecha.', '/matchday', 'clock', 80),
+    ('results', 'Resultados', 'Captura de resultados y cédulas.', '/results', 'score', 90),
+    ('standings', 'Posiciones', 'Tablas de posiciones.', '/standings', 'table', 100),
+    ('discipline', 'Disciplina', 'Motivos de expulsión y sanciones.', '/discipline', 'warning', 110),
+    ('users', 'Usuarios y accesos', 'Usuarios, roles y módulos.', '/users', 'users', 120),
+    ('audit', 'Auditoría', 'Historial de operaciones administrativas.', '/audit', 'history', 130);
+
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id INTEGER,
+    actor_role VARCHAR(30) NOT NULL,
+    action VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    entity_id VARCHAR(80),
+    tournament_id INTEGER,
+    reason VARCHAR(500),
+    old_values TEXT,
+    new_values TEXT,
+    ip_address VARCHAR(45),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_tournament_created ON admin_audit_log(tournament_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON admin_audit_log(entity_type, entity_id);
 
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

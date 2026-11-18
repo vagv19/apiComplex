@@ -4,28 +4,37 @@ declare(strict_types=1);
 
 namespace App\Core;
 
+use App\Middleware\AuthorizationService;
+use App\Middleware\ModuleAccessService;
+
 class Router
 {
     private array $routes = [];
 
-    public function add(string $method, string $path, callable|array $handler): void
+    public function add(string $method, string $path, callable|array $handler, string $capability): void
     {
-        $this->routes[strtoupper($method)][$path] = $handler;
+        if (!in_array(strtoupper($method), ['GET', 'POST', 'DELETE'], true)) {
+            throw new \InvalidArgumentException('La API solo admite rutas GET, POST y DELETE.');
+        }
+        $this->routes[strtoupper($method)][$path] = [
+            'handler' => $handler,
+            'capability' => $capability,
+        ];
     }
 
-    public function get(string $path, callable|array $handler): void
+    public function get(string $path, callable|array $handler, string $capability): void
     {
-        $this->add('GET', $path, $handler);
+        $this->add('GET', $path, $handler, $capability);
     }
 
-    public function post(string $path, callable|array $handler): void
+    public function post(string $path, callable|array $handler, string $capability): void
     {
-        $this->add('POST', $path, $handler);
+        $this->add('POST', $path, $handler, $capability);
     }
 
-    public function delete(string $path, callable|array $handler): void
+    public function delete(string $path, callable|array $handler, string $capability): void
     {
-        $this->add('DELETE', $path, $handler);
+        $this->add('DELETE', $path, $handler, $capability);
     }
 
     public function dispatch(Request $request): void
@@ -34,9 +43,28 @@ class Router
         $path = $path === '' ? '/' : $path;
 
         $routes = $this->routes[$request->method] ?? [];
-        foreach ($routes as $routePattern => $handler) {
+        foreach ($routes as $routePattern => $route) {
             $params = $this->match($routePattern, $path);
             if ($params !== null) {
+                if ($route['capability'] !== 'public') {
+                    $user = AuthorizationService::requireCapability(
+                        $request->headers,
+                        $route['capability'],
+                    );
+                    if ($user['must_change_password']
+                        && !in_array($route['capability'], ['users.password.self', 'users.session.read'], true)) {
+                        throw new HttpException(403, 'Debes cambiar tu contraseña antes de continuar.');
+                    }
+                    $module = ModuleAccessService::moduleForPath($path);
+                    if ($module !== null && !ModuleAccessService::canAccess($user, $module)) {
+                        throw new HttpException(403, 'No tienes acceso a este módulo.');
+                    }
+                    if (!ModuleAccessService::canAccessResource($user, $path)) {
+                        throw new HttpException(403, 'No tienes acceso a recursos de este torneo.');
+                    }
+                }
+
+                $handler = $route['handler'];
                 if (is_array($handler)) {
                     [$controllerName, $methodName] = $handler;
                     $controller = new $controllerName();
@@ -86,13 +114,12 @@ class Router
 
     private function methodNotAllowed(Request $request, string $path): void
     {
-        foreach ($this->routes as $method => $routes) {
+        foreach ($this->routes as $routes) {
             foreach ($routes as $routePattern => $_) {
                 if ($this->match($routePattern, $path) !== null) {
-                    if ($method !== $request->method) {
-                        Response::json(405, false, null, 'El método HTTP no está permitido para esta ruta.', ['method' => $request->method]);
-                        return;
-                    }
+                    header('Allow: GET, POST, DELETE, OPTIONS');
+                    Response::json(405, false, null, 'El método HTTP no está permitido para esta ruta.', ['method' => $request->method]);
+                    return;
                 }
             }
         }
