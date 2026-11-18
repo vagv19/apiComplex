@@ -15,6 +15,7 @@ final class RolePermissions
         'teams.read',
         'teams.manage',
         'teams.self.read',
+        'teams.logo.self',
         'players.read',
         'players.manage',
         'players.registration.manage',
@@ -50,6 +51,7 @@ final class RolePermissions
 
     private const DIRECTOR_CAPABILITIES = [
         'teams.self.read',
+        'teams.logo.self',
         'players.self.read',
         'players.self.manage',
         'players.photo.self',

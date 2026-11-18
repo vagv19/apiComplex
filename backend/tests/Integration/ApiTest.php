@@ -24,6 +24,7 @@ use App\Services\MatchSheetPdfService;
 use App\Services\MatchSheetService;
 use App\Services\PublicTournamentService;
 use App\Services\PlayerPhotoService;
+use App\Services\TeamLogoService;
 use App\Services\FacilityService;
 use App\Services\TournamentFormatService;
 use PHPUnit\Framework\TestCase;
@@ -315,6 +316,118 @@ class ApiTest extends TestCase
         } finally {
             if (is_file($temporaryPath)) {
                 unlink($temporaryPath);
+            }
+            foreach (glob($imageDirectory . DIRECTORY_SEPARATOR . '*') ?: [] as $filePath) {
+                unlink($filePath);
+            }
+            rmdir($imageDirectory);
+        }
+    }
+
+    public function testDirectorCanUploadLogoOnlyForAssignedTeams(): void
+    {
+        $tournamentRepository = new TournamentRepository();
+        $tournament = $tournamentRepository->create([
+            'name' => 'Director Logo League',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+        ]);
+        $tournamentRepository->addTeamToTournament((int) $tournament['id'], 1);
+        $this->assertTrue($tournamentRepository->assignDirectorToTeam(
+            (int) $tournament['id'],
+            1,
+            2,
+        ));
+
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $previousFiles = $_FILES;
+        $outputBufferLevel = ob_get_level();
+        try {
+            $_FILES = [];
+            ob_start();
+            $router->dispatch(new Request(
+                'POST',
+                '/api/v1/teams/1/logo',
+                [],
+                $this->authHeaders(2),
+                [],
+            ));
+            $allowedResponse = json_decode((string) ob_get_clean(), true);
+            self::assertSame(422, http_response_code());
+            self::assertFalse($allowedResponse['success']);
+            self::assertSame('Selecciona una imagen para subir.', $allowedResponse['message']);
+
+            try {
+                $router->dispatch(new Request(
+                    'POST',
+                    '/api/v1/teams/2/logo',
+                    [],
+                    $this->authHeaders(2),
+                    [],
+                ));
+                self::fail('A director must not upload logos for teams outside their assignments.');
+            } catch (HttpException $exception) {
+                self::assertSame(403, $exception->statusCode);
+            }
+        } finally {
+            while (ob_get_level() > $outputBufferLevel) {
+                ob_end_clean();
+            }
+            $_FILES = $previousFiles;
+        }
+    }
+
+    public function testTeamLogoUploadReplacesAndPersistsThePreviousLogo(): void
+    {
+        $imageBytes = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', true);
+        self::assertNotFalse($imageBytes);
+
+        $imageDirectory = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'team-logo-' . bin2hex(random_bytes(6));
+        self::assertTrue(mkdir($imageDirectory));
+        $repository = new TeamRepository();
+        $service = new TeamLogoService(
+            $repository,
+            $imageDirectory,
+            static fn (string $path): bool => true,
+            static fn (string $source, string $destination): bool => rename($source, $destination),
+        );
+        $temporaryPaths = [];
+
+        try {
+            $firstTemporaryPath = tempnam(sys_get_temp_dir(), 'team-logo-first-');
+            self::assertNotFalse($firstTemporaryPath);
+            $temporaryPaths[] = $firstTemporaryPath;
+            file_put_contents($firstTemporaryPath, $imageBytes);
+            $firstTeam = $service->upload(1, [
+                'error' => UPLOAD_ERR_OK,
+                'tmp_name' => $firstTemporaryPath,
+                'size' => strlen($imageBytes),
+            ]);
+            self::assertNotNull($firstTeam);
+            self::assertMatchesRegularExpression('/^team-1-[a-f0-9]{24}\.png$/', $firstTeam['logo_url']);
+            self::assertFileExists($imageDirectory . DIRECTORY_SEPARATOR . $firstTeam['logo_url']);
+
+            $secondTemporaryPath = tempnam(sys_get_temp_dir(), 'team-logo-second-');
+            self::assertNotFalse($secondTemporaryPath);
+            $temporaryPaths[] = $secondTemporaryPath;
+            file_put_contents($secondTemporaryPath, $imageBytes);
+            $secondTeam = $service->upload(1, [
+                'error' => UPLOAD_ERR_OK,
+                'tmp_name' => $secondTemporaryPath,
+                'size' => strlen($imageBytes),
+            ]);
+
+            self::assertNotNull($secondTeam);
+            self::assertNotSame($firstTeam['logo_url'], $secondTeam['logo_url']);
+            self::assertFileDoesNotExist($imageDirectory . DIRECTORY_SEPARATOR . $firstTeam['logo_url']);
+            self::assertFileExists($imageDirectory . DIRECTORY_SEPARATOR . $secondTeam['logo_url']);
+            self::assertSame($secondTeam['logo_url'], $repository->findById(1)['logo_url']);
+        } finally {
+            foreach ($temporaryPaths as $temporaryPath) {
+                if (is_file($temporaryPath)) {
+                    unlink($temporaryPath);
+                }
             }
             foreach (glob($imageDirectory . DIRECTORY_SEPARATOR . '*') ?: [] as $filePath) {
                 unlink($filePath);

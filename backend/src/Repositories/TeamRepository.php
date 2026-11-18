@@ -49,6 +49,43 @@ class TeamRepository
         return $row ?: null;
     }
 
+    public function setLogo(int $id, string $filename): ?array
+    {
+        $stmt = Database::getConnection()->prepare(
+            'UPDATE teams SET logo_url = :logo_url, updated_at = CURRENT_TIMESTAMP WHERE id = :id AND is_active = 1',
+        );
+        $stmt->execute([
+            ':logo_url' => $filename,
+            ':id' => $id,
+        ]);
+        return $this->findById($id);
+    }
+
+    public function isAssignedToDirector(int $teamId, int $directorUserId): bool
+    {
+        $stmt = Database::getConnection()->prepare(
+            "SELECT 1
+             FROM tournament_teams tt
+             JOIN tournament_team_coaches c ON c.tournament_team_id = tt.id
+             JOIN teams t ON t.id = tt.team_id
+             JOIN users u ON u.id = c.user_id
+             WHERE tt.team_id = :team_id
+               AND tt.status = 'ACTIVE'
+               AND t.is_active = 1
+               AND c.user_id = :director_user_id
+               AND c.is_active = 1
+               AND u.role = 'director_tecnico'
+               AND u.is_active = 1
+               AND u.deleted_at IS NULL
+             LIMIT 1",
+        );
+        $stmt->execute([
+            ':team_id' => $teamId,
+            ':director_user_id' => $directorUserId,
+        ]);
+        return $stmt->fetchColumn() !== false;
+    }
+
     public function create(array $data): array
     {
         $stmt = Database::getConnection()->prepare('INSERT INTO teams (name, short_name, logo_url, contact_name, contact_phone, is_active) VALUES (:name, :short_name, :logo_url, :contact_name, :contact_phone, 1)');

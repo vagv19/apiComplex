@@ -7,7 +7,12 @@ namespace App\Controllers;
 use App\Core\Request;
 use App\Core\Response;
 use App\Core\Validator;
+use App\Middleware\AuthMiddleware;
+use App\Middleware\AuthorizationService;
 use App\Repositories\TeamRepository;
+use App\Services\TeamLogoService;
+use InvalidArgumentException;
+use RuntimeException;
 
 class TeamController
 {
@@ -49,6 +54,57 @@ class TeamController
         }
 
         Response::json(200, true, $team, 'Equipo consultado.');
+    }
+
+    public function uploadLogo(Request $request, array $params): void
+    {
+        $user = AuthMiddleware::requireAuth($request->headers);
+        if (!AuthorizationService::hasCapability($user, 'teams.logo.self')) {
+            throw new \App\Core\HttpException(403, 'Se requiere el rol de administrador o director técnico.');
+        }
+
+        $teamId = filter_var($params['id'] ?? null, FILTER_VALIDATE_INT);
+        if ($teamId === false || $teamId < 1) {
+            Response::json(422, false, null, 'El identificador del equipo no es válido.');
+            return;
+        }
+
+        $team = $this->repository->findById($teamId);
+        if ($team === null) {
+            Response::json(404, false, null, 'Equipo no encontrado.');
+            return;
+        }
+
+        if (!AuthorizationService::hasCapability($user, 'teams.manage')) {
+            $directorUserId = filter_var($user['sub'] ?? null, FILTER_VALIDATE_INT);
+            if (
+                $directorUserId === false
+                || $directorUserId < 1
+                || !$this->repository->isAssignedToDirector($teamId, $directorUserId)
+            ) {
+                throw new \App\Core\HttpException(403, 'Solo puedes subir logotipos de tus equipos asignados.');
+            }
+        }
+
+        try {
+            $updatedTeam = (new TeamLogoService($this->repository))->upload($teamId, $_FILES['logo'] ?? []);
+        } catch (InvalidArgumentException $exception) {
+            Response::json(422, false, null, $exception->getMessage(), [
+                'logo' => [$exception->getMessage()],
+            ]);
+            return;
+        } catch (RuntimeException $exception) {
+            error_log($exception->getMessage());
+            Response::json(500, false, null, 'No fue posible guardar el logotipo del equipo.');
+            return;
+        }
+
+        if ($updatedTeam === null) {
+            Response::json(404, false, null, 'Equipo no encontrado.');
+            return;
+        }
+
+        Response::json(200, true, $updatedTeam, 'Logotipo del equipo guardado.');
     }
 
     public function update(Request $request, array $params): void

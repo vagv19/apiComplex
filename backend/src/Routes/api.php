@@ -56,6 +56,7 @@ return function (): Router {
     $router->post('/api/v1/teams', [TeamController::class, 'create'], 'teams.manage');
     $router->get('/api/v1/teams/{id}', [TeamController::class, 'get'], 'teams.read');
     $router->post('/api/v1/teams/{id}', [TeamController::class, 'update'], 'teams.manage');
+    $router->post('/api/v1/teams/{id}/logo', [TeamController::class, 'uploadLogo'], 'teams.logo.self');
     $router->post('/api/v1/teams/{id}/delete', [TeamController::class, 'delete'], 'teams.manage');
     $router->get('/api/v1/teams/{id}/history', [TeamController::class, 'history'], 'teams.read');
     $router->get('/api/v1/teams/{id}/roster', [TeamController::class, 'roster'], 'teams.read');

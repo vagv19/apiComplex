@@ -77,6 +77,7 @@ assigned team.
 - `GET /api/v1/dashboard`
 - `GET /api/v1/categories`
 - `POST /api/v1/teams`
+- `POST /api/v1/teams/{id}/logo`
 - `POST /api/v1/teams/{id}/delete`
 - `POST /api/v1/players/{id}/photo`
 - `POST /api/v1/players/{id}/delete`
@@ -194,6 +195,26 @@ curl -X POST http://127.0.0.1/apiComplex/backend/public/api/v1/players/42/photo 
 Success returns HTTP `200` with the updated player in `data`. Invalid or missing
 images return `422`; unauthenticated/unauthorized requests return `401`/`403`;
 unknown players return `404`; players that already have a photo return `409`.
+
+### Upload or replace a team logo
+
+`POST /api/v1/teams/{id}/logo` requires an administrator or director
+technician bearer token and a `multipart/form-data` file field named `logo`.
+Directors may update only teams actively assigned to them; administrators may
+update any active team. The endpoint accepts JPEG, PNG, and WEBP images up to
+5 MB. The stored filename is saved to `teams.logo_url` and served from
+`/backend/img/teams/{filename}`. Replacing a logo removes the previous
+application-managed image after the new filename is persisted.
+
+```bash
+curl -X POST http://127.0.0.1/apiComplex/backend/public/api/v1/teams/12/logo \
+  -H "Authorization: Bearer <director-token>" \
+  -F "logo=@team-logo.png"
+```
+
+Success returns HTTP `200` with the updated team in `data`. Invalid or missing
+images return `422`; unauthenticated/unauthorized requests return `401`/`403`;
+unknown teams return `404`.
 
 ### Register a tournament player
 
