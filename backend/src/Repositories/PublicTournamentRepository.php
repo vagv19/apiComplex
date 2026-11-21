@@ -79,6 +79,60 @@ final class PublicTournamentRepository
         return $statement->fetchColumn() !== false;
     }
 
+    public function groupBelongsToTournament(int $tournamentId, int $groupId): bool
+    {
+        $statement = ($this->pdo ?? Database::getConnection())->prepare(
+            "SELECT 1
+             FROM tournament_groups g
+             JOIN tournament_stages s ON s.id = g.stage_id
+             WHERE g.id = :group_id
+                AND s.tournament_id = :tournament_id
+                AND s.stage_type = 'GROUP_STAGE'"
+        );
+        $statement->execute([
+            ':group_id' => $groupId,
+            ':tournament_id' => $tournamentId,
+        ]);
+
+        return $statement->fetchColumn() !== false;
+    }
+
+    public function getUpcomingMatches(int $tournamentId, int $limit): array
+    {
+        $statement = ($this->pdo ?? Database::getConnection())->prepare(
+            "SELECT m.id, m.match_date, m.kickoff_time, m.venue,
+                    h.name AS home_team_name, a.name AS away_team_name,
+                    r.round_number, r.name AS round_name, s.name AS stage_name,
+                    g.name AS group_name
+             FROM matches m
+             JOIN rounds r ON r.id = m.round_id
+             JOIN tournament_stages s ON s.id = r.stage_id
+             JOIN tournament_teams ht ON ht.id = m.home_tournament_team_id
+             JOIN teams h ON h.id = ht.team_id
+             JOIN tournament_teams at ON at.id = m.away_tournament_team_id
+             JOIN teams a ON a.id = at.team_id
+             LEFT JOIN tournament_groups g ON g.id = r.group_id
+             WHERE s.tournament_id = :tournament_id
+                AND m.status = 'SCHEDULED'
+                AND m.is_bye = 0
+                AND m.match_date IS NOT NULL
+                AND (
+                    m.match_date > CURRENT_DATE
+                    OR (m.match_date = CURRENT_DATE AND m.kickoff_time > CURRENT_TIME)
+                )
+             ORDER BY m.match_date,
+                      CASE WHEN m.kickoff_time IS NULL THEN 1 ELSE 0 END,
+                      m.kickoff_time, s.sequence_number, r.round_number,
+                      m.match_number, m.id
+             LIMIT :result_limit"
+        );
+        $statement->bindValue(':tournament_id', $tournamentId, PDO::PARAM_INT);
+        $statement->bindValue(':result_limit', min(5, $limit), PDO::PARAM_INT);
+        $statement->execute();
+
+        return $statement->fetchAll(PDO::FETCH_ASSOC);
+    }
+
     public function getTopScorers(int $tournamentId, int $limit): array
     {
         $pdo = $this->pdo ?? Database::getConnection();

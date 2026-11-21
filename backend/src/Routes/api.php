@@ -93,6 +93,9 @@ return function (): Router {
     $router->post('/api/v1/tournaments/{id}/players', [TournamentController::class, 'registerPlayer'], 'players.registration.manage');
     $router->post('/api/v1/tournaments/{id}/players/batch', [TournamentController::class, 'registerPlayers'], 'players.registration.manage');
     $router->delete('/api/v1/tournaments/{id}/players/{registration_id}', [TournamentController::class, 'removePlayerFromRoster'], 'players.registration.manage');
+    $router->get('/api/v1/tournaments/{id}/players/{player_id}', [TournamentController::class, 'tournamentPlayer'], 'tournaments.players.read');
+    $router->post('/api/v1/tournaments/{id}/players/{player_id}', [TournamentController::class, 'updateTournamentPlayer'], 'players.self.manage');
+    $router->post('/api/v1/tournaments/{id}/players/{player_id}/photo', [TournamentController::class, 'uploadTournamentPlayerPhoto'], 'players.photo.self');
     $router->get('/api/v1/tournaments/{id}/players', [TournamentController::class, 'players'], 'tournaments.players.read');
     $router->post('/api/v1/tournaments/{id}/player-registration', [TournamentController::class, 'togglePlayerRegistration'], 'tournaments.registration.manage');
 
@@ -132,6 +135,9 @@ return function (): Router {
     $router->get('/api/v1/public/matches/first', [PublicTournamentController::class, 'firstMatchOfDay'], 'public');
     $router->get('/api/v1/public/facilities/images', [FacilityController::class, 'images'], 'public');
     $router->get('/api/v1/public/facilities/images/{filename}', [FacilityController::class, 'image'], 'public');
+    $router->get('/api/v1/public/tournaments/{id}/standings', [PublicTournamentController::class, 'standings'], 'public');
+    $router->get('/api/v1/public/tournaments/{id}/groups', [PublicTournamentController::class, 'groups'], 'public');
+    $router->get('/api/v1/public/tournaments/{id}/upcoming-matches', [PublicTournamentController::class, 'upcomingMatches'], 'public');
     $router->get('/api/v1/public/tournaments/{id}/top-scorers', [PublicTournamentController::class, 'topScorers'], 'public');
     $router->get('/api/v1/public/tournaments/{id}/images', [PublicTournamentController::class, 'images'], 'public');
     $router->get('/api/v1/public/tournaments/{id}/images/{filename}', [PublicTournamentController::class, 'image'], 'public');

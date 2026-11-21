@@ -353,6 +353,140 @@ class TournamentRepository
         return $stmt->fetchAll();
     }
 
+    public function getTournamentPlayer(
+        int $tournamentId,
+        int $playerId,
+        ?int $directorUserId = null,
+        bool $forUpdate = false,
+    ): ?array {
+        $pdo = Database::getConnection();
+        $sql = 'SELECT tp.*, tt.team_id, p.first_name, p.last_name, p.birth_date, p.photo_url,
+                       p.phone, p.email, p.is_active, t.name AS team_name
+                FROM tournament_players tp
+                JOIN tournament_teams tt ON tt.id = tp.tournament_team_id
+                JOIN teams t ON t.id = tt.team_id
+                JOIN players p ON p.id = tp.player_id';
+        $parameters = [
+            ':tournament_id' => $tournamentId,
+            ':player_id' => $playerId,
+        ];
+        if ($directorUserId !== null) {
+            $sql .= " JOIN tournament_team_coaches c
+                      ON c.tournament_team_id = tt.id
+                     AND c.user_id = :director_user_id
+                     AND c.is_active = 1
+                     JOIN users u ON u.id = c.user_id
+                                  AND u.role = 'director_tecnico'
+                                  AND u.is_active = 1
+                                  AND u.deleted_at IS NULL";
+            $parameters[':director_user_id'] = $directorUserId;
+        }
+        $sql .= " WHERE tp.tournament_id = :tournament_id
+                    AND tp.player_id = :player_id
+                    AND tp.status = 'ACTIVE'
+                    AND tt.status = 'ACTIVE'
+                    AND t.is_active = 1
+                    AND p.is_active = 1";
+        if ($forUpdate && $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
+            $sql .= ' FOR UPDATE';
+        }
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($parameters);
+        return $stmt->fetch() ?: null;
+    }
+
+    public function updateTournamentPlayer(
+        int $tournamentId,
+        int $playerId,
+        ?int $directorUserId,
+        array $profile,
+        ?int $jerseyNumber,
+    ): ?array {
+        $pdo = Database::getConnection();
+        $pdo->beginTransaction();
+        try {
+            $current = $this->getTournamentPlayer($tournamentId, $playerId, $directorUserId, true);
+            if ($current === null) {
+                $pdo->rollBack();
+                return null;
+            }
+
+            if ($jerseyNumber !== null) {
+                $jerseyQuery = $pdo->prepare(
+                    'SELECT id FROM tournament_players
+                     WHERE tournament_team_id = :tournament_team_id
+                       AND jersey_number = :jersey_number
+                       AND id <> :registration_id
+                     LIMIT 1',
+                );
+                $jerseyQuery->execute([
+                    ':tournament_team_id' => (int) $current['tournament_team_id'],
+                    ':jersey_number' => $jerseyNumber,
+                    ':registration_id' => (int) $current['id'],
+                ]);
+                if ($jerseyQuery->fetchColumn() !== false) {
+                    throw new \DomainException('El número de camiseta ya está asignado a otro jugador del equipo.');
+                }
+            }
+
+            $playerUpdate = $pdo->prepare(
+                'UPDATE players
+                 SET first_name = :first_name,
+                     last_name = :last_name,
+                     birth_date = :birth_date,
+                     phone = :phone,
+                     email = :email,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = :player_id AND is_active = 1',
+            );
+            $playerUpdate->execute([
+                ':first_name' => $profile['first_name'],
+                ':last_name' => $profile['last_name'],
+                ':birth_date' => $profile['birth_date'],
+                ':phone' => $profile['phone'],
+                ':email' => $profile['email'],
+                ':player_id' => $playerId,
+            ]);
+
+            $registrationUpdate = $pdo->prepare(
+                'UPDATE tournament_players
+                 SET jersey_number = :jersey_number
+                 WHERE id = :registration_id AND tournament_id = :tournament_id',
+            );
+            $registrationUpdate->execute([
+                ':jersey_number' => $jerseyNumber,
+                ':registration_id' => (int) $current['id'],
+                ':tournament_id' => $tournamentId,
+            ]);
+
+            $updated = $this->getTournamentPlayer($tournamentId, $playerId, $directorUserId);
+            if ($updated === null) {
+                throw new \RuntimeException('No fue posible consultar al jugador después de actualizarlo.');
+            }
+
+            $pdo->commit();
+            return $updated;
+        } catch (\PDOException $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $databaseMessage = (string) ($exception->errorInfo[2] ?? $exception->getMessage());
+            if (
+                str_contains($databaseMessage, 'uq_jersey')
+                || str_contains($databaseMessage, 'tournament_players.tournament_team_id, tournament_players.jersey_number')
+            ) {
+                throw new \DomainException('El número de camiseta ya está asignado a otro jugador del equipo.', 0, $exception);
+            }
+            throw $exception;
+        } catch (\Throwable $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $exception;
+        }
+    }
+
     public function createPlayerForDirector(int $tournamentId, int $directorUserId, array $player, ?int $jerseyNumber): int
     {
         return $this->createPlayerForTournamentTeam($tournamentId, $player, $jerseyNumber, $directorUserId);

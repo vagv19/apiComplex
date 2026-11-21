@@ -32,6 +32,30 @@ final class PublicTournamentService
         return $this->repository->getTopScorers($tournamentId, $limit);
     }
 
+    public function getStandings(int $tournamentId, ?int $groupId = null): array
+    {
+        $this->requireTournament($tournamentId);
+        if ($groupId !== null && !$this->repository->groupBelongsToTournament($tournamentId, $groupId)) {
+            throw new \DomainException('Grupo no encontrado en el torneo.');
+        }
+
+        return (new StandingsService())->calculate($tournamentId, $groupId);
+    }
+
+    public function getGroups(int $tournamentId): array
+    {
+        $this->requireTournament($tournamentId);
+
+        return (new TournamentFormatService())->listGroups($tournamentId);
+    }
+
+    public function getUpcomingMatches(int $tournamentId, int $limit = 5): array
+    {
+        $this->requireTournament($tournamentId);
+
+        return $this->repository->getUpcomingMatches($tournamentId, min(5, $limit));
+    }
+
     public function getImages(int $tournamentId, string $urlPrefix): array
     {
         $this->requireTournament($tournamentId);

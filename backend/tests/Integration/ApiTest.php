@@ -844,6 +844,222 @@ class ApiTest extends TestCase
         $this->assertSame(0, (int) Database::getConnection()->query("SELECT COUNT(*) FROM players WHERE first_name = 'Duplicate'")->fetchColumn());
     }
 
+    public function testDirectorCanEditOnlyPlayersInAssignedTournamentTeam(): void
+    {
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Director Player Edit',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $assignedTeam = (new TeamRepository())->create(['name' => 'Assigned Edit Team']);
+        $otherTeam = (new TeamRepository())->create(['name' => 'Other Edit Team']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $assignedTeam['id']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $otherTeam['id']);
+        $this->assertTrue($repository->assignDirectorToTeam(
+            (int) $tournament['id'],
+            (int) $assignedTeam['id'],
+            2,
+        ));
+
+        $playerId = $repository->createPlayerForDirector(
+            (int) $tournament['id'],
+            2,
+            ['first_name' => 'Roster', 'last_name' => 'Player', 'birth_date' => '2000-01-02'],
+            7,
+        );
+        $sameTeamPlayerId = $repository->createPlayerForDirector(
+            (int) $tournament['id'],
+            2,
+            ['first_name' => 'Second', 'last_name' => 'Roster Player'],
+            9,
+        );
+        $otherTeamPlayerId = $repository->createPlayerForTournamentTeam(
+            (int) $tournament['id'],
+            ['first_name' => 'Other', 'last_name' => 'Team Player'],
+            10,
+            null,
+            (int) $otherTeam['id'],
+        );
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '2',
+            'role' => 'director_tecnico',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = function (
+            string $method,
+            string $path,
+            array $body = [],
+            ?array $requestHeaders = null,
+        ) use ($router, $headers): array {
+            return $this->captureJsonResponse(fn () => $router->dispatch(
+                new Request($method, $path, [], $requestHeaders ?? $headers, $body)
+            ));
+        };
+        $basePath = '/api/v1/tournaments/' . $tournament['id'] . '/players/';
+
+        $loaded = $dispatch('GET', $basePath . $playerId);
+        $this->assertSame(200, $loaded['status']);
+        $this->assertSame($playerId, (int) $loaded['body']['data']['player_id']);
+        $this->assertSame(7, (int) $loaded['body']['data']['jersey_number']);
+
+        $updated = $dispatch('POST', $basePath . $playerId, [
+            'first_name' => 'Edited',
+            'last_name' => 'Roster Player',
+            'birth_date' => '2001-02-03',
+            'phone' => '555-0101',
+            'email' => 'edited@example.com',
+            'jersey_number' => 8,
+        ]);
+        $this->assertSame(200, $updated['status']);
+        $this->assertSame('Edited', $updated['body']['data']['first_name']);
+        $this->assertSame(8, (int) $updated['body']['data']['jersey_number']);
+        $savedProfile = (new PlayerRepository())->findById($playerId);
+        $this->assertSame('Roster Player', $savedProfile['last_name']);
+        $this->assertSame('edited@example.com', $savedProfile['email']);
+
+        $duplicateJersey = $dispatch('POST', $basePath . $playerId, [
+            'first_name' => 'Edited',
+            'last_name' => 'Roster Player',
+            'jersey_number' => 9,
+        ]);
+        $this->assertSame(409, $duplicateJersey['status']);
+        $this->assertSame(8, (int) $repository->getTournamentPlayer((int) $tournament['id'], $playerId, 2)['jersey_number']);
+
+        $foreignPlayer = $dispatch('GET', $basePath . $otherTeamPlayerId);
+        $this->assertSame(404, $foreignPlayer['status']);
+        $forbiddenUpdate = $dispatch('POST', $basePath . $otherTeamPlayerId, [
+            'first_name' => 'Changed',
+            'last_name' => 'Without Permission',
+            'jersey_number' => null,
+        ]);
+        $this->assertSame(404, $forbiddenUpdate['status']);
+        $this->assertSame('Other', (new PlayerRepository())->findById($otherTeamPlayerId)['first_name']);
+
+        $invalid = $dispatch('POST', $basePath . $sameTeamPlayerId, [
+            'first_name' => 'Invalid',
+            'last_name' => 'Date',
+            'birth_date' => '2024-02-30',
+            'jersey_number' => null,
+        ]);
+        $this->assertSame(422, $invalid['status']);
+        $this->assertSame('Second', (new PlayerRepository())->findById($sameTeamPlayerId)['first_name']);
+
+        $unauthenticated = false;
+        try {
+            $router->dispatch(new Request('GET', $basePath . $playerId, [], [], []));
+        } catch (HttpException $exception) {
+            $unauthenticated = $exception->statusCode === 401;
+        }
+        $this->assertTrue($unauthenticated);
+    }
+
+    public function testDirectorCanReplacePhotoOnlyForAssignedTournamentPlayers(): void
+    {
+        $imageBytes = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', true);
+        self::assertNotFalse($imageBytes);
+
+        $repository = new TournamentRepository();
+        $tournament = $repository->create([
+            'name' => 'Director Photo Replacement',
+            'category_id' => 1,
+            'format' => 'LEAGUE',
+            'status' => 'REGISTRATION',
+            'player_registration_start_at' => '2020-01-01 00:00:00',
+            'player_registration_end_at' => '2099-12-31 23:59:59',
+        ]);
+        $assignedTeam = (new TeamRepository())->create(['name' => 'Assigned Photo Team']);
+        $otherTeam = (new TeamRepository())->create(['name' => 'Other Photo Team']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $assignedTeam['id']);
+        $repository->addTeamToTournament((int) $tournament['id'], (int) $otherTeam['id']);
+        $this->assertTrue($repository->assignDirectorToTeam(
+            (int) $tournament['id'],
+            (int) $assignedTeam['id'],
+            2,
+        ));
+        $playerId = $repository->createPlayerForDirector(
+            (int) $tournament['id'],
+            2,
+            ['first_name' => 'Photo', 'last_name' => 'Owner'],
+            null,
+        );
+        $otherPlayerId = $repository->createPlayerForTournamentTeam(
+            (int) $tournament['id'],
+            ['first_name' => 'Other', 'last_name' => 'Photo'],
+            null,
+            null,
+            (int) $otherTeam['id'],
+        );
+
+        $imageDirectory = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'director-photo-' . bin2hex(random_bytes(6));
+        self::assertTrue(mkdir($imageDirectory));
+        $oldFilename = 'player-' . $playerId . '-' . str_repeat('a', 24) . '.png';
+        $oldPhotoPath = $imageDirectory . DIRECTORY_SEPARATOR . $oldFilename;
+        file_put_contents($oldPhotoPath, $imageBytes);
+        Database::getConnection()->prepare('UPDATE players SET photo_url = :photo_url WHERE id = :id')
+            ->execute([':photo_url' => $oldFilename, ':id' => $playerId]);
+
+        $temporaryPath = tempnam(sys_get_temp_dir(), 'director-photo-upload-');
+        self::assertNotFalse($temporaryPath);
+        file_put_contents($temporaryPath, $imageBytes);
+        $photoService = new PlayerPhotoService(
+            new PlayerRepository(),
+            $imageDirectory,
+            static fn (string $path): bool => true,
+            static fn (string $source, string $destination): bool => rename($source, $destination),
+        );
+        $controller = new TournamentController($repository, null, $photoService);
+        $headers = ['Authorization' => 'Bearer ' . signToken([
+            'sub' => '2',
+            'role' => 'director_tecnico',
+            'iat' => time(),
+            'exp' => time() + 60,
+            'iss' => 'football-tournament-api',
+        ])];
+        $previousFiles = $_FILES;
+
+        try {
+            $_FILES = [
+                'photo' => [
+                    'error' => UPLOAD_ERR_OK,
+                    'tmp_name' => $temporaryPath,
+                    'size' => strlen($imageBytes),
+                ],
+            ];
+            $uploaded = $this->captureJsonResponse(fn () => $controller->uploadTournamentPlayerPhoto(
+                new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/players/' . $playerId . '/photo', [], $headers, []),
+                ['id' => (int) $tournament['id'], 'player_id' => $playerId],
+            ));
+            $this->assertSame(200, $uploaded['status']);
+            $this->assertNotSame($oldFilename, $uploaded['body']['data']['photo_url']);
+            $this->assertFileDoesNotExist($oldPhotoPath);
+            $this->assertFileExists($imageDirectory . DIRECTORY_SEPARATOR . $uploaded['body']['data']['photo_url']);
+
+            $_FILES = [];
+            $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+            $unassigned = $this->captureJsonResponse(fn () => $router->dispatch(
+                new Request('POST', '/api/v1/tournaments/' . $tournament['id'] . '/players/' . $otherPlayerId . '/photo', [], $headers, []),
+            ));
+            $this->assertSame(404, $unassigned['status']);
+            $this->assertNull((new PlayerRepository())->findById($otherPlayerId)['photo_url']);
+        } finally {
+            $_FILES = $previousFiles;
+            if (is_file($temporaryPath)) {
+                unlink($temporaryPath);
+            }
+            foreach (glob($imageDirectory . DIRECTORY_SEPARATOR . '*') ?: [] as $filePath) {
+                unlink($filePath);
+            }
+            rmdir($imageDirectory);
+        }
+    }
+
     public function testOnlyAdministratorsCanAssignTournamentDirectors(): void
     {
         $tournament = (new TournamentRepository())->create([
@@ -2241,6 +2457,145 @@ class ApiTest extends TestCase
         $this->assertSame('2026-11-05', $pdo->query(
             'SELECT match_date FROM matches WHERE id = ' . $firstMatchId
         )->fetchColumn());
+    }
+
+    public function testPublicStandingsGroupsAndUpcomingMatchesAreAvailableWithoutAuthentication(): void
+    {
+        [$tournament, $seedMatchId] = $this->createMatchReportFixture('Public tournament data');
+        $pdo = Database::getConnection();
+        $tournamentId = (int) $tournament['id'];
+        $basePath = '/api/v1/public/tournaments/' . $tournamentId;
+        $router = (require dirname(__DIR__, 2) . '/src/Routes/api.php')();
+        $dispatch = fn (string $path, array $query = []): array => $this->captureJsonResponse(
+            fn () => $router->dispatch(new Request('GET', $path, $query, [], []))
+        );
+
+        $standings = $dispatch($basePath . '/standings');
+        $this->assertSame(200, $standings['status']);
+        $this->assertCount(2, $standings['body']['data']);
+        $this->assertSame(0, $standings['body']['data'][0]['played']);
+
+        $roundQuery = $pdo->prepare(
+            'SELECT r.id AS round_id, r.stage_id
+             FROM matches m
+             JOIN rounds r ON r.id = m.round_id
+             WHERE m.id = :match_id'
+        );
+        $roundQuery->execute([':match_id' => $seedMatchId]);
+        $round = $roundQuery->fetch(PDO::FETCH_ASSOC);
+        $roundId = (int) $round['round_id'];
+
+        $pdo->prepare('UPDATE tournaments SET tournament_type = :type WHERE id = :id')
+            ->execute([':type' => 'FLASH', ':id' => $tournamentId]);
+        $pdo->prepare('UPDATE tournament_stages SET stage_type = :type WHERE id = :id')
+            ->execute([':type' => 'GROUP_STAGE', ':id' => (int) $round['stage_id']]);
+        $groupInsert = $pdo->prepare(
+            'INSERT INTO tournament_groups (stage_id, name, group_order)
+             VALUES (:stage_id, :name, 1)'
+        );
+        $groupInsert->execute([':stage_id' => (int) $round['stage_id'], ':name' => 'A']);
+        $groupId = (int) $pdo->lastInsertId();
+        $pdo->prepare('UPDATE rounds SET group_id = :group_id WHERE id = :id')
+            ->execute([':group_id' => $groupId, ':id' => $roundId]);
+        $groupTeamInsert = $pdo->prepare(
+            'INSERT INTO group_teams (group_id, tournament_team_id)
+             VALUES (:group_id, :tournament_team_id)'
+        );
+        foreach (['home_tournament_team_id', 'away_tournament_team_id'] as $teamKey) {
+            $groupTeamInsert->execute([
+                ':group_id' => $groupId,
+                ':tournament_team_id' => (int) $tournament[$teamKey],
+            ]);
+        }
+
+        $databaseNowRow = $pdo->query(
+            'SELECT CURRENT_DATE AS database_date, CURRENT_TIME AS database_time'
+        )->fetch(PDO::FETCH_ASSOC);
+        $databaseNow = new \DateTimeImmutable($databaseNowRow['database_date'] . ' ' . $databaseNowRow['database_time']);
+        $todayPast = $databaseNow->modify('-5 minutes');
+        $todayFuture = $databaseNow->modify('+5 minutes');
+        $pdo->prepare(
+            'UPDATE matches
+             SET match_date = :match_date, kickoff_time = :kickoff_time, status = :status
+             WHERE id = :id'
+        )->execute([
+            ':match_date' => $databaseNow->modify('-1 day')->format('Y-m-d'),
+            ':kickoff_time' => '23:59:00',
+            ':status' => 'SCHEDULED',
+            ':id' => $seedMatchId,
+        ]);
+
+        $insertMatch = static function (
+            string $date,
+            string $time,
+            string $status = 'SCHEDULED',
+            bool $isBye = false
+        ) use ($pdo, $roundId, $tournament): int {
+            $statement = $pdo->prepare(
+                'INSERT INTO matches (
+                    round_id, home_tournament_team_id, away_tournament_team_id,
+                    match_date, kickoff_time, status, is_bye
+                 ) VALUES (
+                    :round_id, :home_team_id, :away_team_id,
+                    :match_date, :kickoff_time, :status, :is_bye
+                 )'
+            );
+            $statement->execute([
+                ':round_id' => $roundId,
+                ':home_team_id' => (int) $tournament['home_tournament_team_id'],
+                ':away_team_id' => $isBye ? null : (int) $tournament['away_tournament_team_id'],
+                ':match_date' => $date,
+                ':kickoff_time' => $time,
+                ':status' => $status,
+                ':is_bye' => $isBye ? 1 : 0,
+            ]);
+
+            return (int) $pdo->lastInsertId();
+        };
+
+        $expectedUpcomingIds = [
+            $insertMatch($todayFuture->format('Y-m-d'), $todayFuture->format('H:i:s')),
+        ];
+        for ($day = 1; $day <= 5; $day++) {
+            $date = $databaseNow->modify('+' . $day . ' days')->format('Y-m-d');
+            $expectedUpcomingIds[] = $insertMatch($date, '14:00:00');
+        }
+        $pastTodayId = $insertMatch($todayPast->format('Y-m-d'), $todayPast->format('H:i:s'));
+        $cancelledId = $insertMatch(
+            $databaseNow->modify('+1 day')->format('Y-m-d'),
+            '15:00:00',
+            'CANCELLED'
+        );
+        $byeId = $insertMatch(
+            $databaseNow->modify('+1 day')->format('Y-m-d'),
+            '16:00:00',
+            'BYE',
+            true
+        );
+
+        $groups = $dispatch($basePath . '/groups');
+        $this->assertSame(200, $groups['status']);
+        $this->assertSame($groupId, (int) $groups['body']['data'][0]['id']);
+        $groupStandings = $dispatch($basePath . '/standings', ['group_id' => (string) $groupId]);
+        $this->assertSame(200, $groupStandings['status']);
+        $this->assertCount(2, $groupStandings['body']['data']);
+        $this->assertSame(422, $dispatch($basePath . '/standings', ['group_id' => 'invalid'])['status']);
+        $this->assertSame(404, $dispatch($basePath . '/standings', ['group_id' => '99999'])['status']);
+
+        $scorers = $dispatch($basePath . '/top-scorers', ['limit' => '5']);
+        $this->assertSame(200, $scorers['status']);
+        $this->assertSame([], $scorers['body']['data']);
+
+        $upcoming = $dispatch($basePath . '/upcoming-matches');
+        $this->assertSame(200, $upcoming['status']);
+        $this->assertCount(5, $upcoming['body']['data']);
+        $actualIds = array_map(static fn (array $match): int => (int) $match['id'], $upcoming['body']['data']);
+        $this->assertSame(array_slice($expectedUpcomingIds, 0, 5), $actualIds);
+        $this->assertNotContains($pastTodayId, $actualIds);
+        $this->assertNotContains($cancelledId, $actualIds);
+        $this->assertNotContains($byeId, $actualIds);
+        $this->assertSame(422, $dispatch($basePath . '/upcoming-matches', ['limit' => '6'])['status']);
+        $this->assertSame(404, $dispatch('/api/v1/public/tournaments/99999/standings')['status']);
     }
 
     public function testPublicTopScorersCountOnlyCompletedIndividualGoalsAndShareTiedPositions(): void

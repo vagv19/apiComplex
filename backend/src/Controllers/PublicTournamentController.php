@@ -63,6 +63,76 @@ final class PublicTournamentController
         }
     }
 
+    public function standings(Request $request, array $params): void
+    {
+        $tournamentId = $this->parseTournamentId($params['id'] ?? null);
+        if ($tournamentId === null) {
+            Response::json(422, false, null, 'Identificador de torneo inválido.');
+            return;
+        }
+
+        $groupId = null;
+        if (array_key_exists('group_id', $request->query)) {
+            $groupId = $this->parseTournamentId($request->query['group_id']);
+            if ($groupId === null) {
+                Response::json(422, false, null, 'El parámetro group_id debe ser un entero positivo.');
+                return;
+            }
+        }
+
+        try {
+            Response::json(
+                200,
+                true,
+                $this->service->getStandings($tournamentId, $groupId),
+                'Tabla general consultada.'
+            );
+        } catch (DomainException) {
+            Response::json(404, false, null, 'Torneo o grupo no encontrado.');
+        }
+    }
+
+    public function groups(Request $request, array $params): void
+    {
+        $tournamentId = $this->parseTournamentId($params['id'] ?? null);
+        if ($tournamentId === null) {
+            Response::json(422, false, null, 'Identificador de torneo inválido.');
+            return;
+        }
+
+        try {
+            Response::json(200, true, $this->service->getGroups($tournamentId), 'Grupos públicos consultados.');
+        } catch (DomainException) {
+            Response::json(404, false, null, 'Torneo no encontrado.');
+        }
+    }
+
+    public function upcomingMatches(Request $request, array $params): void
+    {
+        $tournamentId = $this->parseTournamentId($params['id'] ?? null);
+        if ($tournamentId === null) {
+            Response::json(422, false, null, 'Identificador de torneo inválido.');
+            return;
+        }
+
+        $limit = $this->parseUpcomingLimit($request->query['limit'] ?? null);
+        if ($limit === null) {
+            Response::json(422, false, null, 'El parámetro limit debe ser un entero entre 1 y 5.');
+            return;
+        }
+
+        try {
+            Response::json(
+                200,
+                true,
+                $this->service->getUpcomingMatches($tournamentId, $limit),
+                'Próximos partidos consultados.'
+            );
+        } catch (DomainException) {
+            Response::json(404, false, null, 'Torneo no encontrado.');
+        }
+    }
+
     public function images(Request $request, array $params): void
     {
         $tournamentId = $this->parseTournamentId($params['id'] ?? null);
@@ -152,6 +222,20 @@ final class PublicTournamentController
         $limit = filter_var($value, FILTER_VALIDATE_INT);
 
         return $limit !== false && $limit >= 1 && $limit <= 100 ? $limit : null;
+    }
+
+    private function parseUpcomingLimit(mixed $value): ?int
+    {
+        if ($value === null) {
+            return 5;
+        }
+        if (!is_string($value) || !preg_match('/^[0-9]+$/D', $value)) {
+            return null;
+        }
+
+        $limit = filter_var($value, FILTER_VALIDATE_INT);
+
+        return $limit !== false && $limit >= 1 && $limit <= 5 ? $limit : null;
     }
 
     private function parseDate(mixed $value): ?string

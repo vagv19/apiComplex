@@ -27,7 +27,7 @@ final class PlayerPhotoService
             ?? static fn (string $source, string $destination): bool => move_uploaded_file($source, $destination);
     }
 
-    public function upload(int $playerId, array $file): ?array
+    public function upload(int $playerId, array $file, bool $replaceExisting = false): ?array
     {
         $player = $this->repository->findById($playerId);
         if ($player === null) {
@@ -35,17 +35,8 @@ final class PlayerPhotoService
         }
         $directory = $this->imageDirectory
             ?? dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'img' . DIRECTORY_SEPARATOR . 'players';
-        $existingFilename = basename(str_replace('\\', '/', (string) ($player['photo_url'] ?? '')));
-        $existingPhotoPath = $directory . DIRECTORY_SEPARATOR . $existingFilename;
-        $resolvedPhotoDirectory = realpath($directory);
-        $resolvedExistingPhoto = is_link($existingPhotoPath) ? false : realpath($existingPhotoPath);
-        if (
-            !empty($player['photo_url'])
-            && $resolvedPhotoDirectory !== false
-            && $resolvedExistingPhoto !== false
-            && dirname($resolvedExistingPhoto) === $resolvedPhotoDirectory
-            && is_file($resolvedExistingPhoto)
-        ) {
+        $existingPhotoUrl = (string) ($player['photo_url'] ?? '');
+        if ($existingPhotoUrl !== '' && !$replaceExisting) {
             throw new DomainException('El jugador ya tiene una fotografía registrada.');
         }
 
@@ -97,24 +88,57 @@ final class PlayerPhotoService
             throw new RuntimeException('No se pudo guardar la fotografía del jugador.');
         }
 
+        $photoSaved = false;
         try {
-            if (!$this->repository->setPhotoIfEmpty($playerId, $filename)) {
-                if (!unlink($destination)) {
-                    error_log('No se pudo limpiar una foto duplicada de jugador.');
-                }
-                $currentPlayer = $this->repository->findById($playerId);
-                if ($currentPlayer === null) {
+            $photoSaved = $existingPhotoUrl !== ''
+                ? $this->repository->replacePhotoIfUnchanged($playerId, $existingPhotoUrl, $filename)
+                : $this->repository->setPhotoIfEmpty($playerId, $filename);
+            if (!$photoSaved) {
+                if ($this->repository->findById($playerId) === null) {
+                    if (!unlink($destination)) {
+                        error_log('No se pudo limpiar una foto de un jugador que dejó de estar activo.');
+                    }
                     return null;
                 }
-                throw new DomainException('El jugador ya tiene una fotografía registrada.');
+                throw new DomainException('La fotografía del jugador cambió durante la carga. Intenta de nuevo.');
             }
 
-            return $this->repository->findById($playerId);
+            $updatedPlayer = $this->repository->findById($playerId);
+            if ($updatedPlayer === null) {
+                throw new RuntimeException('No fue posible consultar al jugador después de guardar su fotografía.');
+            }
         } catch (\Throwable $exception) {
-            if (is_file($destination) && !unlink($destination)) {
+            if (!$photoSaved && is_file($destination) && !unlink($destination)) {
                 error_log('No se pudo limpiar una foto de jugador después de fallar la actualización de datos.');
             }
             throw $exception;
+        }
+
+        if ($existingPhotoUrl !== '') {
+            $this->removeManagedPhoto($existingPhotoUrl, $directory);
+        }
+
+        return $updatedPlayer;
+    }
+
+    private function removeManagedPhoto(string $photoUrl, string $directory): void
+    {
+        $filename = basename(str_replace('\\', '/', $photoUrl));
+        if (preg_match('/^player-\d+-[a-f0-9]{24}\.(jpg|png|webp)$/', $filename) !== 1) {
+            return;
+        }
+
+        $resolvedDirectory = realpath($directory);
+        $path = $directory . DIRECTORY_SEPARATOR . $filename;
+        $resolvedPhoto = is_link($path) ? false : realpath($path);
+        if (
+            $resolvedDirectory !== false
+            && $resolvedPhoto !== false
+            && dirname($resolvedPhoto) === $resolvedDirectory
+            && is_file($resolvedPhoto)
+            && !unlink($resolvedPhoto)
+        ) {
+            error_log('No se pudo eliminar la fotografía anterior del jugador.');
         }
     }
 

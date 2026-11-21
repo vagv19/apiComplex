@@ -97,6 +97,9 @@ assigned team.
 - `POST /api/v1/tournaments/{id}/teams/{team_id}/director`
 - `GET /api/v1/tournaments/{id}/my-team`
 - `POST /api/v1/tournaments/{id}/my-team/players`
+- `GET /api/v1/tournaments/{id}/players/{player_id}`
+- `POST /api/v1/tournaments/{id}/players/{player_id}`
+- `POST /api/v1/tournaments/{id}/players/{player_id}/photo`
 - `GET /api/v1/tournaments/{id}/players`
 - `POST /api/v1/tournaments/{id}/players`
 - `POST /api/v1/tournaments/{id}/players/batch`
@@ -134,6 +137,9 @@ assigned team.
 - `POST /api/v1/users/change-password`
 - `POST /api/v1/users/reset-password`
 - `GET /api/v1/public/tournaments`
+- `GET /api/v1/public/tournaments/{id}/standings`
+- `GET /api/v1/public/tournaments/{id}/groups`
+- `GET /api/v1/public/tournaments/{id}/upcoming-matches`
 - `GET /api/v1/public/facilities/images`
 - `GET /api/v1/public/facilities/images/{filename}`
 - `GET /api/v1/public/tournaments/{id}/top-scorers`
@@ -195,6 +201,63 @@ curl -X POST http://127.0.0.1/apiComplex/backend/public/api/v1/players/42/photo 
 Success returns HTTP `200` with the updated player in `data`. Invalid or missing
 images return `422`; unauthenticated/unauthorized requests return `401`/`403`;
 unknown players return `404`; players that already have a photo return `409`.
+
+### Consult and edit a player in a tournament roster
+
+These routes require authentication. Directors can read or edit only active
+players registered to their own active team in the specified tournament.
+Administrators can use them for any active player registration in that
+tournament. Player IDs refer to the permanent `players` catalog; the API
+rechecks the tournament registration and director/team assignment on every
+request.
+
+```http
+GET  /api/v1/tournaments/15/players/42
+POST /api/v1/tournaments/15/players/42
+```
+
+The `POST` body edits the player's catalog profile and that tournament
+registration's jersey number:
+
+```json
+{
+  "first_name": "Ana",
+  "last_name": "López García",
+  "birth_date": "2001-02-03",
+  "phone": "555-0101",
+  "email": "ana@example.com",
+  "jersey_number": 8
+}
+```
+
+`birth_date`, `phone`, and `email` may be `null`; `jersey_number` is required
+and may be `null` to clear it. A duplicate jersey number in the team returns
+`409`. Name, birth date, contact details, and photograph are catalog fields, so
+changes to them are visible in every tournament where that player appears.
+The jersey number is stored only on the specified tournament registration.
+Invalid IDs or fields return `422`; a player not registered to the requested
+tournament/team returns `404`; unauthorized access returns `401` or `403`.
+
+### Upload or replace a photo for a tournament-roster player
+
+`POST /api/v1/tournaments/{id}/players/{player_id}/photo` accepts the same
+`multipart/form-data` `photo` field and JPEG, PNG, or WEBP formats up to 5 MB.
+Directors are scoped to their assigned team in that tournament; administrators
+may act on any active registration in it. The photo belongs to the global
+player catalog and is therefore shared with that player's other tournaments.
+This roster-scoped route replaces an existing application-managed photo after
+the new file is stored; the generic `/api/v1/players/{id}/photo` route retains
+its existing no-replacement behavior.
+
+```bash
+curl -X POST http://127.0.0.1/apiComplex/backend/public/api/v1/tournaments/15/players/42/photo \
+  -H "Authorization: Bearer <director-token>" \
+  -F "photo=@player.jpg"
+```
+
+Success returns HTTP `200` with the updated catalog player in `data`. Invalid
+images return `422`; unassigned or missing roster players return `404`;
+unauthenticated or unauthorized requests return `401`/`403`.
 
 ### Upload or replace a team logo
 
@@ -543,6 +606,62 @@ GET /api/v1/public/matches/first?date=2026-10-13
     "away_team_name": "Equipo visitante",
     "tournament_name": "Liga de otoño"
   }
+}
+```
+
+### Tablas, grupos y próximos partidos públicos
+
+Estas consultas no requieren autenticación. La tabla general recibe un torneo
+y, opcionalmente, `group_id` para consultar la tabla de un grupo FLASH. Un
+grupo que no pertenezca al torneo responde `404`. La ruta de grupos devuelve
+los grupos FLASH disponibles para el selector del sitio y una lista vacía
+para los demás formatos.
+
+```http
+GET /api/v1/public/tournaments/15/standings
+GET /api/v1/public/tournaments/15/standings?group_id=3
+GET /api/v1/public/tournaments/15/groups
+```
+
+Las tablas devuelven las filas calculadas por el servicio de posiciones
+(posición, equipo, partidos, goles y puntos); los grupos devuelven su `id`,
+`name` y equipos inscritos. Un `group_id` que no sea un entero positivo y un
+`limit` fuera del rango permitido responden `422`.
+
+`GET /api/v1/public/tournaments/{id}/upcoming-matches` devuelve partidos
+programados de ese torneo cuya fecha y hora sean posteriores a la fecha y hora
+actuales del servidor de base de datos. Excluye partidos pasados, cancelados,
+pospuestos y descansos. El resultado se ordena cronológicamente y contiene
+como máximo cinco partidos. `limit` es opcional, predeterminado a 5 y acepta
+valores de 1 a 5.
+
+```http
+GET /api/v1/public/tournaments/15/upcoming-matches?limit=5
+```
+
+La respuesta de la agenda contiene `id`, `match_date`, `kickoff_time`,
+`venue`, nombres de equipos, ronda, etapa y grupo cuando corresponde. Un torneo
+inexistente responde `404`; un identificador inválido responde `422`.
+La respuesta de cada consulta mantiene la envoltura JSON estándar:
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": 31,
+      "match_date": "2026-11-20",
+      "kickoff_time": "18:30:00",
+      "venue": "Cancha 1",
+      "home_team_name": "Equipo local",
+      "away_team_name": "Equipo visitante",
+      "round_number": 2,
+      "round_name": "Jornada 2",
+      "stage_name": "Fase de grupos",
+      "group_name": "A"
+    }
+  ],
+  "message": "Próximos partidos consultados."
 }
 ```
 

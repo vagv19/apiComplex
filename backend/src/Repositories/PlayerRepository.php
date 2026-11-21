@@ -96,6 +96,21 @@ class PlayerRepository
         return $stmt->rowCount() > 0;
     }
 
+    public function replacePhotoIfUnchanged(int $id, string $expectedFilename, string $filename): bool
+    {
+        $stmt = Database::getConnection()->prepare(
+            'UPDATE players
+             SET photo_url = :photo_url, updated_at = CURRENT_TIMESTAMP
+             WHERE id = :id AND is_active = 1 AND photo_url = :expected_photo_url',
+        );
+        $stmt->execute([
+            ':photo_url' => $filename,
+            ':id' => $id,
+            ':expected_photo_url' => $expectedFilename,
+        ]);
+        return $stmt->rowCount() > 0;
+    }
+
     public function isRegisteredToDirector(int $playerId, int $directorUserId): bool
     {
         $stmt = Database::getConnection()->prepare(

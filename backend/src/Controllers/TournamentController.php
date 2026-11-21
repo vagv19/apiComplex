@@ -10,17 +10,21 @@ use App\Core\Validator;
 use App\Middleware\AuthMiddleware;
 use App\Middleware\AuthorizationService;
 use App\Repositories\TournamentRepository;
+use App\Services\PlayerPhotoService;
 use App\Services\PlayerRegistrationService;
 
 class TournamentController
 {
     private readonly PlayerRegistrationService $registrationService;
+    private readonly PlayerPhotoService $photoService;
 
     public function __construct(
         private readonly TournamentRepository $repository = new TournamentRepository(),
         ?PlayerRegistrationService $registrationService = null,
+        ?PlayerPhotoService $photoService = null,
     ) {
         $this->registrationService = $registrationService ?? new PlayerRegistrationService($repository);
+        $this->photoService = $photoService ?? new PlayerPhotoService();
     }
 
     public function list(Request $request, array $params): void
@@ -272,6 +276,189 @@ class TournamentController
 
         $players = $this->repository->getPlayersForTournamentTeam($tournamentId, (int) $team['tournament_team_id']);
         Response::json(200, true, ['team' => $team, 'players' => $players], 'Equipo y plantilla del director técnico.');
+    }
+
+    public function tournamentPlayer(Request $request, array $params): void
+    {
+        $user = AuthMiddleware::requireAuth($request->headers);
+        if (!AuthorizationService::hasCapability($user, 'tournaments.players.read')) {
+            throw new \App\Core\HttpException(403, 'No tienes permiso para consultar jugadores de este torneo.');
+        }
+
+        $ids = $this->validatedTournamentPlayerIds($params);
+        if ($ids === null) {
+            return;
+        }
+        $directorUserId = $this->directorScopeUserId($user, 'players.registration.manage');
+        $player = $this->repository->getTournamentPlayer($ids['tournament_id'], $ids['player_id'], $directorUserId);
+        if ($player === null) {
+            Response::json(404, false, null, 'No se encontró un jugador activo en la plantilla de este torneo.');
+            return;
+        }
+
+        Response::json(200, true, $player, 'Jugador de la plantilla consultado.');
+    }
+
+    public function updateTournamentPlayer(Request $request, array $params): void
+    {
+        $user = AuthMiddleware::requireAuth($request->headers);
+        if (!AuthorizationService::hasCapability($user, 'players.self.manage')) {
+            throw new \App\Core\HttpException(403, 'No tienes permiso para editar jugadores de la plantilla.');
+        }
+
+        $ids = $this->validatedTournamentPlayerIds($params);
+        if ($ids === null) {
+            return;
+        }
+
+        $body = $request->body;
+        foreach (['first_name', 'last_name', 'birth_date', 'phone', 'email'] as $field) {
+            if (isset($body[$field]) && is_string($body[$field])) {
+                $body[$field] = trim($body[$field]);
+                if ($body[$field] === '' && $field !== 'first_name' && $field !== 'last_name') {
+                    $body[$field] = null;
+                }
+            }
+        }
+
+        $errors = Validator::validate($body, [
+            'first_name' => ['required', 'string'],
+            'last_name' => ['required', 'string'],
+        ]);
+        foreach (['first_name' => 100, 'last_name' => 150, 'phone' => 30, 'email' => 150] as $field => $maxLength) {
+            if (
+                isset($body[$field])
+                && (!is_string($body[$field]) || strlen($body[$field]) > $maxLength)
+            ) {
+                $errors[$field][] = "El campo no puede exceder {$maxLength} caracteres.";
+            }
+        }
+        if (isset($body['email']) && $body['email'] !== null && $body['email'] !== '' && !filter_var($body['email'], FILTER_VALIDATE_EMAIL)) {
+            $errors['email'][] = 'El correo es inválido.';
+        }
+        if (isset($body['birth_date']) && $body['birth_date'] !== null) {
+            $date = is_string($body['birth_date'])
+                ? \DateTimeImmutable::createFromFormat('!Y-m-d', $body['birth_date'])
+                : false;
+            if ($date === false || $date->format('Y-m-d') !== $body['birth_date']) {
+                $errors['birth_date'][] = 'La fecha debe tener el formato YYYY-MM-DD.';
+            }
+        }
+        if (!array_key_exists('jersey_number', $body)) {
+            $errors['jersey_number'][] = 'El número de camiseta es obligatorio; puede ser null.';
+            $jerseyNumber = null;
+        } else {
+            $jerseyNumber = $body['jersey_number'];
+            if (
+                $jerseyNumber !== null
+                && ((!is_int($jerseyNumber) && !(is_string($jerseyNumber) && ctype_digit($jerseyNumber)))
+                    || (int) $jerseyNumber < 0
+                    || (int) $jerseyNumber > 65535)
+            ) {
+                $errors['jersey_number'][] = 'Indica un número entero entre 0 y 65535 o null.';
+            }
+        }
+        if ($errors !== []) {
+            Response::json(422, false, null, 'Validación fallida.', $errors);
+            return;
+        }
+
+        try {
+            $player = $this->repository->updateTournamentPlayer(
+                $ids['tournament_id'],
+                $ids['player_id'],
+                $this->directorScopeUserId($user, 'players.registration.manage'),
+                [
+                    'first_name' => $body['first_name'],
+                    'last_name' => $body['last_name'],
+                    'birth_date' => $body['birth_date'] ?? null,
+                    'phone' => $body['phone'] ?? null,
+                    'email' => $body['email'] ?? null,
+                ],
+                $jerseyNumber === null ? null : (int) $jerseyNumber,
+            );
+        } catch (\DomainException $exception) {
+            Response::json(409, false, null, $exception->getMessage());
+            return;
+        }
+        if ($player === null) {
+            Response::json(404, false, null, 'No se encontró un jugador activo en la plantilla de este torneo.');
+            return;
+        }
+
+        Response::json(200, true, $player, 'Jugador actualizado en la plantilla del torneo.');
+    }
+
+    public function uploadTournamentPlayerPhoto(Request $request, array $params): void
+    {
+        $user = AuthMiddleware::requireAuth($request->headers);
+        if (!AuthorizationService::hasCapability($user, 'players.photo.self')) {
+            throw new \App\Core\HttpException(403, 'No tienes permiso para cambiar fotografías de jugadores.');
+        }
+
+        $ids = $this->validatedTournamentPlayerIds($params);
+        if ($ids === null) {
+            return;
+        }
+        $directorUserId = $this->directorScopeUserId($user, 'players.photo.manage');
+        if ($this->repository->getTournamentPlayer($ids['tournament_id'], $ids['player_id'], $directorUserId) === null) {
+            Response::json(404, false, null, 'No se encontró un jugador activo en la plantilla de este torneo.');
+            return;
+        }
+
+        try {
+            $player = $this->photoService->upload(
+                $ids['player_id'],
+                $_FILES['photo'] ?? [],
+                true,
+            );
+        } catch (\InvalidArgumentException $exception) {
+            Response::json(422, false, null, $exception->getMessage(), [
+                'photo' => [$exception->getMessage()],
+            ]);
+            return;
+        } catch (\DomainException $exception) {
+            Response::json(409, false, null, $exception->getMessage());
+            return;
+        } catch (\RuntimeException $exception) {
+            error_log($exception->getMessage());
+            Response::json(500, false, null, 'No fue posible guardar la fotografía.');
+            return;
+        }
+        if ($player === null) {
+            Response::json(404, false, null, 'No se encontró el jugador.');
+            return;
+        }
+
+        Response::json(200, true, $player, 'Fotografía del jugador guardada.');
+    }
+
+    private function validatedTournamentPlayerIds(array $params): ?array
+    {
+        $ids = [];
+        foreach (['id' => 'tournament_id', 'player_id' => 'player_id'] as $parameter => $field) {
+            $value = filter_var($params[$parameter] ?? null, FILTER_VALIDATE_INT);
+            if ($value === false || $value < 1) {
+                Response::json(422, false, null, 'Los identificadores del torneo y jugador deben ser enteros positivos.', [
+                    $field => ['Indica un identificador válido.'],
+                ]);
+                return null;
+            }
+            $ids[$field] = $value;
+        }
+        return $ids;
+    }
+
+    private function directorScopeUserId(array $user, string $managerCapability): ?int
+    {
+        if (AuthorizationService::hasCapability($user, $managerCapability)) {
+            return null;
+        }
+        $userId = filter_var($user['sub'] ?? null, FILTER_VALIDATE_INT);
+        if ($userId === false || $userId < 1) {
+            throw new \App\Core\HttpException(403, 'El identificador del director técnico no es válido.');
+        }
+        return $userId;
     }
 
     public function registerPlayerForDirector(Request $request, array $params): void
